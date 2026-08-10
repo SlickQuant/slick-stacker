@@ -1,0 +1,50 @@
+// Copyright 2026 Slick Quant
+// SPDX-License-Identifier: MIT
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+#define SLICK_STACKER_VERSION_MAJOR 0
+#define SLICK_STACKER_VERSION_MINOR 1
+#define SLICK_STACKER_VERSION_PATCH 0
+
+#define SLICK_STACKER_NAMESPACE_BEGIN namespace slick::stacker {
+#define SLICK_STACKER_NAMESPACE_END }
+
+// ---------------------------------------------------------------------------
+// Compiler attributes
+//
+// Branch hints are the standard C++20 [[likely]] / [[unlikely]], written at the
+// use sites. Cold-path placement has no standard spelling, so the two macros
+// below stay: the stacker sits directly on the order-entry path, and error
+// handling, venue rejects and grid rebuilds are pushed out of line to keep the
+// hot instruction footprint small.
+// ---------------------------------------------------------------------------
+
+#if defined(__GNUC__) || defined(__clang__)
+#define SLICK_STACKER_NEVER_INLINE __attribute__((noinline))
+#define SLICK_STACKER_COLD __attribute__((cold))
+#elif defined(_MSC_VER)
+#define SLICK_STACKER_NEVER_INLINE __declspec(noinline)
+#define SLICK_STACKER_COLD
+#else
+#define SLICK_STACKER_NEVER_INLINE
+#define SLICK_STACKER_COLD
+#endif
+
+// ---------------------------------------------------------------------------
+// Invariant validation
+//
+// `validate()` is always compiled (tests call it explicitly), but the internal
+// assertion hooks sprinkled through the mutating paths only fire when
+// SLICK_STACKER_VALIDATE is defined. Leave it off in production builds.
+// ---------------------------------------------------------------------------
+
+#ifdef SLICK_STACKER_VALIDATE
+#include <cassert>
+#define SLICK_STACKER_ASSERT(x) assert(x)
+#else
+#define SLICK_STACKER_ASSERT(x) ((void)0)
+#endif
