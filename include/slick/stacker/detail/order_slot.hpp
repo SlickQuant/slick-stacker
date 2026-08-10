@@ -64,6 +64,15 @@ struct order_slot {
 
     order_state_t state = order_state_t::free;
 
+    /// Modify requests sent against this order and not yet answered.
+    ///
+    /// With a chain outstanding, `state` alone can no longer say whether the
+    /// venue still owes us something: an intermediate acknowledgement arrives
+    /// while later requests are still in the air. The count is what makes a
+    /// reject unambiguous -- rolling intent back to the last confirmed state is
+    /// only correct once nothing else is outstanding to overrule it.
+    std::uint8_t inflight_modifies = 0;
+
     /// An action we want but could not send yet, because the venue will not
     /// accept it until the order is acknowledged. `price` and `order_qty`
     /// already hold what we want, so the deferred action needs no payload of

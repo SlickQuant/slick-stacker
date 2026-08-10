@@ -370,4 +370,9 @@ TEST(StackerShape, ConfigValidation) {
     cfg.max_orders_per_level = 0;
     EXPECT_EQ(cfg.validate<test_traits>(),
               slick::stacker::config_error::max_orders_per_level_zero);
+
+    cfg = base_cfg();
+    cfg.max_inflight_modifies = 0;
+    EXPECT_EQ(cfg.validate<test_traits>(),
+              slick::stacker::config_error::max_inflight_modifies_zero);
 }

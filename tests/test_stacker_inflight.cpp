@@ -208,6 +208,249 @@ TEST(StackerInFlight, FillAgainstAnOrderWithADeferredCancel) {
     EXPECT_CONSISTENT(h);
 }
 
+// --- chained modifies -------------------------------------------------------
+//
+// Venues that chain replaces on the client order id accept a modify against an
+// order whose previous one is unanswered. Holding back would put a round trip
+// between the strategy deciding and the venue hearing about it.
+
+namespace {
+
+stacker_config chain_cfg(std::uint8_t depth) {
+    auto cfg = strict_cfg();
+    cfg.ack_required = false;
+    cfg.max_inflight_modifies = depth;
+    return cfg;
+}
+
+/// Drive the top level to `qty` and reconcile, without acknowledging anything.
+void retarget(buy_harness& h, qty_t qty) {
+    h.st.quote(1000, qty);
+    h.reconcile();
+}
+
+}  // namespace
+
+TEST(StackerChainedModify, SecondModifyGoesOutImmediately) {
+    buy_harness h{chain_cfg(4)};
+    h.quote(1000, 25);
+    h.ack_all();
+    const auto id = placed_at(h.exec, 1000);
+
+    const auto mark = h.exec.mark();
+    retarget(h, 20);
+    retarget(h, 15);
+
+    EXPECT_EQ(h.exec.count(mock_executor::kind::modify, mark), 2u)
+        << "the second change must not wait for the first to be answered";
+    EXPECT_EQ(h.exec.log.back().qty, 15);
+    EXPECT_EQ(h.working(1000), 15);
+    EXPECT_EQ(h.acked(1000), 25) << "the venue has confirmed none of it yet";
+    ASSERT_CONSISTENT(h);
+
+    // Both answers arrive in order; the order settles at the last intent.
+    h.st.on_replaced(id, 1000, 20);
+    ASSERT_CONSISTENT(h);
+    EXPECT_EQ(h.working(1000), 15) << "an intermediate ack must not settle the order";
+    h.st.on_replaced(id, 1000, 15);
+    EXPECT_EQ(h.working(1000), 15);
+    EXPECT_EQ(h.acked(1000), 15);
+    EXPECT_CONSISTENT(h);
+}
+
+TEST(StackerChainedModify, DepthOneIsTheDefaultAndStillDefers) {
+    buy_harness h{chain_cfg(1)};
+    h.quote(1000, 25);
+    h.ack_all();
+    ASSERT_EQ(h.st.config().max_inflight_modifies, 1);
+
+    const auto mark = h.exec.mark();
+    retarget(h, 20);
+    retarget(h, 15);
+    EXPECT_EQ(h.exec.count(mock_executor::kind::modify, mark), 1u);
+    EXPECT_EQ(h.working(1000), 15) << "intent still lands immediately, only the message waits";
+    EXPECT_CONSISTENT(h);
+}
+
+TEST(StackerChainedModify, ChainDepthIsCapped) {
+    buy_harness h{chain_cfg(2)};
+    h.quote(1000, 25);
+    h.ack_all();
+    const auto id = placed_at(h.exec, 1000);
+
+    const auto mark = h.exec.mark();
+    retarget(h, 20);
+    retarget(h, 15);
+    retarget(h, 10);
+    EXPECT_EQ(h.exec.count(mock_executor::kind::modify, mark), 2u) << "the third waits";
+    EXPECT_EQ(h.working(1000), 10);
+    ASSERT_CONSISTENT(h);
+
+    // Answering one frees a slot in the chain, and the deferred change goes.
+    h.st.on_replaced(id, 1000, 20);
+    EXPECT_EQ(h.exec.count(mock_executor::kind::modify, mark), 3u);
+    EXPECT_EQ(h.exec.log.back().qty, 10);
+    EXPECT_CONSISTENT(h);
+}
+
+// A reject part way along the chain must not clobber the intent carried by the
+// requests still in the air behind it.
+TEST(StackerChainedModify, RejectMidChainDoesNotDiscardLaterIntent) {
+    buy_harness h{chain_cfg(4)};
+    h.quote(1000, 25);
+    h.ack_all();
+    const auto id = placed_at(h.exec, 1000);
+
+    retarget(h, 20);
+    retarget(h, 15);
+    ASSERT_EQ(h.working(1000), 15);
+
+    h.st.on_modify_rejected(id, reject_reason_t::terminal);
+    EXPECT_EQ(h.working(1000), 15) << "the second modify is still outstanding and still wanted";
+    EXPECT_EQ(h.acked(1000), 25);
+    ASSERT_CONSISTENT(h);
+
+    h.st.on_replaced(id, 1000, 15);
+    EXPECT_EQ(h.working(1000), 15);
+    EXPECT_EQ(h.acked(1000), 15);
+    EXPECT_CONSISTENT(h);
+}
+
+TEST(StackerChainedModify, RejectOfTheLastLinkRollsBackToTheLastAck) {
+    buy_harness h{chain_cfg(4)};
+    h.quote(1000, 25);
+    h.ack_all();
+    const auto id = placed_at(h.exec, 1000);
+
+    retarget(h, 20);
+    retarget(h, 15);
+
+    h.st.on_replaced(id, 1000, 20);  // first link confirmed
+    ASSERT_CONSISTENT(h);
+    h.st.on_modify_rejected(id, reject_reason_t::terminal);
+
+    EXPECT_EQ(h.acked(1000), 20);
+    EXPECT_EQ(h.working(1000), 20) << "reality is what the last acknowledgement said";
+    ASSERT_CONSISTENT(h);
+
+    // The target still wants 15, so reconcile tries again.
+    const auto mark = h.exec.mark();
+    h.settle();
+    EXPECT_EQ(h.exec.count(mock_executor::kind::modify, mark), 1u);
+    EXPECT_EQ(h.working(1000), 15);
+    EXPECT_CONSISTENT(h);
+}
+
+TEST(StackerChainedModify, WholeChainRejectedUnwindsToTheOriginal) {
+    buy_harness h{chain_cfg(4)};
+    h.quote(1000, 25);
+    h.ack_all();
+    const auto id = placed_at(h.exec, 1000);
+
+    retarget(h, 20);
+    retarget(h, 15);
+
+    h.st.on_modify_rejected(id, reject_reason_t::terminal);
+    ASSERT_CONSISTENT(h);
+    h.st.on_modify_rejected(id, reject_reason_t::terminal);
+
+    EXPECT_EQ(h.acked(1000), 25);
+    EXPECT_EQ(h.working(1000), 25) << "nothing was applied, so the order is as it started";
+    EXPECT_EQ(h.orders_at(1000), 1u);
+    EXPECT_CONSISTENT(h);
+}
+
+TEST(StackerChainedModify, FillAgainstAChainedOrder) {
+    buy_harness h{chain_cfg(4)};
+    h.quote(1000, 25);
+    h.ack_all();
+    const auto id = placed_at(h.exec, 1000);
+
+    retarget(h, 20);
+    retarget(h, 15);
+
+    // The venue is still working 25 while our intent is 15; a fill can take
+    // more than we currently intend, which is the exposure a chain buys.
+    h.st.on_filled(id, 25, 1000);
+    EXPECT_CONSISTENT(h);
+    EXPECT_EQ(h.acked(1000), 0);
+
+    // The outstanding answers still have to be absorbed cleanly.
+    h.st.on_modify_rejected(id, reject_reason_t::too_late_to_act);
+    ASSERT_CONSISTENT(h);
+    h.st.on_modify_rejected(id, reject_reason_t::too_late_to_act);
+    EXPECT_EQ(h.st.live_order_count(), 0u);
+    EXPECT_CONSISTENT(h);
+}
+
+TEST(StackerChainedModify, WalkingTheQuoteWithoutWaiting) {
+    auto cfg = chain_cfg(8);
+    cfg.levels = 2;
+    cfg.stack_qty = 10;
+    buy_harness h{cfg};
+    h.quote(1000, 20);
+    h.ack_all();
+
+    // Three price moves back to back with nothing acknowledged in between.
+    h.st.quote(1010, 20);
+    h.reconcile();
+    h.st.quote(1020, 20);
+    h.reconcile();
+    h.st.quote(1030, 20);
+    h.reconcile();
+    ASSERT_CONSISTENT(h);
+
+    h.settle(16);
+    EXPECT_EQ(h.working(1030), 20);
+    EXPECT_EQ(h.working(1020), 10);
+    EXPECT_EQ(h.working(1010), 10);
+    EXPECT_EQ(h.working(1000), 0);
+    EXPECT_EQ(h.exec.venue_qty_at(1000), 0);
+    EXPECT_CONSISTENT(h);
+}
+
+// A grid rebuild orphans every working order. A reject arriving afterwards for
+// one of them must not book it back into a level it no longer belongs to.
+TEST(StackerChainedModify, ModifyRejectAfterAGridRebuild) {
+    auto cfg = chain_cfg(4);
+    buy_harness h{cfg};
+    h.quote(1000, 25);
+    h.ack_all();
+    const auto id = placed_at(h.exec, 1000);
+
+    retarget(h, 20);
+    ASSERT_EQ(h.exec.count(mock_executor::kind::modify), 1u);
+
+    // Rebuild the grid on a finer tick. 1000 is still on the new grid, so the
+    // rolled-back order would find a level to be re-homed into -- and must
+    // refuse it anyway, because it no longer belongs to this book.
+    auto finer = cfg;
+    finer.tick_size = 5;
+    h.st.configure(finer);
+    h.reconcile();
+    ASSERT_GT(h.st.rebase_count(), 1u);
+    ASSERT_CONSISTENT(h);
+
+    // The rebuild re-quoted 1000 with a fresh order. The rolled-back orphan
+    // must not join it there -- if it did, the level would count quantity the
+    // stacker has already cancelled.
+    ASSERT_EQ(h.orders_at(1000), 1u);
+    const qty_t before = h.working(1000);
+
+    h.st.on_modify_rejected(id, reject_reason_t::terminal);
+    EXPECT_CONSISTENT(h) << "an orphaned order must not be re-homed";
+    EXPECT_EQ(h.orders_at(1000), 1u) << "still just the new order";
+    EXPECT_EQ(h.working(1000), before);
+
+    h.st.on_canceled(id, 25);
+    EXPECT_CONSISTENT(h);
+    h.settle(16);
+    EXPECT_EQ(h.working(1000), 20);
+    EXPECT_EQ(h.st.live_order_count(), 1u) << "the orphan is retired, the new quote is working";
+    EXPECT_EQ(h.exec.live_orders(), 1u);
+    EXPECT_CONSISTENT(h);
+}
+
 TEST(StackerInFlight, LadderConvergesOverSeveralRoundTrips) {
     auto cfg = strict_cfg();
     cfg.levels = 3;

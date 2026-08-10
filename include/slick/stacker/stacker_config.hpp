@@ -38,6 +38,7 @@ enum class config_error : std::uint8_t {
     qty_increment_not_positive,
     max_order_qty_below_min,
     max_orders_per_level_zero,
+    max_inflight_modifies_zero,
 };
 
 [[nodiscard]] constexpr const char* to_string(config_error e) noexcept {
@@ -60,6 +61,8 @@ enum class config_error : std::uint8_t {
             return "max_order_qty must be >= min_order_qty";
         case config_error::max_orders_per_level_zero:
             return "max_orders_per_level must be > 0";
+        case config_error::max_inflight_modifies_zero:
+            return "max_inflight_modifies must be > 0";
     }
     return "unknown";
 }
@@ -146,6 +149,28 @@ struct stacker_config {
     /// order slot and fires it from the acknowledgement.
     bool ack_required = true;
 
+    /// How many modify requests may be outstanding against one order at once.
+    ///
+    /// 1 -- the default -- means a further change waits for the one in flight
+    /// to be answered. That is a round trip of latency between the strategy
+    /// deciding and the venue hearing about it, which on a fast instrument is
+    /// exactly the wrong place to spend time.
+    ///
+    /// Venues that chain replaces on the client order id (CME among them)
+    /// accept a modify against an order whose previous modify has not been
+    /// answered yet. Raising this lets the stacker keep up with the market
+    /// instead of with the session.
+    ///
+    /// The cost is exposure, not correctness: until the chain drains, the venue
+    /// is working a quantity the stacker no longer intends, and a reject part
+    /// way along unwinds to the last state the venue actually confirmed. Keep
+    /// it small -- a chain deeper than the round trip is latency you are not
+    /// getting back.
+    ///
+    /// Independent of `ack_required`, which governs the first request against
+    /// an order rather than subsequent ones.
+    std::uint8_t max_inflight_modifies = 1;
+
     /// Prefer repricing a surplus order into a level that needs quantity over
     /// cancelling it and sending a new one. Saves messages and order slots, at
     /// the cost of losing queue position at the destination either way.
@@ -189,6 +214,9 @@ struct stacker_config {
         }
         if (max_orders_per_level == 0) {
             return config_error::max_orders_per_level_zero;
+        }
+        if (max_inflight_modifies == 0) {
+            return config_error::max_inflight_modifies_zero;
         }
         return config_error::ok;
     }

@@ -219,13 +219,13 @@ public:
     /// A new order was accepted. `price` and `qty` are what the venue booked,
     /// which is normally but not necessarily what we asked for.
     void on_accepted(const order_id_t& id, price_t price, qty_t qty) noexcept {
-        on_confirmed(id, price, qty);
+        on_confirmed(id, price, qty, /*is_replace=*/false);
     }
 
     /// A modify was accepted. `qty` is the new total order quantity, on the
     /// same basis as the quantity passed to `Executor::modify`.
     void on_replaced(const order_id_t& id, price_t price, qty_t qty) noexcept {
-        on_confirmed(id, price, qty);
+        on_confirmed(id, price, qty, /*is_replace=*/true);
     }
 
     /// An execution. `fill_qty` is this fill alone, not a running total.
@@ -310,6 +310,18 @@ public:
         if (si == k_null_slot) {
             return;
         }
+        slot_type& s = pool_[si];
+        if (s.inflight_modifies > 0) {
+            --s.inflight_modifies;
+        }
+        if (s.inflight_modifies > 0) {
+            // A later request in the chain is still outstanding and carries the
+            // real intent. Rolling back now would clobber it; whichever
+            // response lands last decides what the venue is actually holding.
+            dirty_ = true;
+            return;
+        }
+
         rollback_to_acked(si);
         if (is_done(pool_[si])) {
             // The reject was "too late to act" in disguise: the order had
@@ -613,7 +625,7 @@ private:
     // -----------------------------------------------------------------------
 
     [[nodiscard]] static bool is_done(const slot_type& s) noexcept {
-        if (s.pending != pending_action_t::none) {
+        if (s.pending != pending_action_t::none || s.inflight_modifies != 0) {
             return false;
         }
         // A new order or a modify may still be confirmed for quantity we do not
@@ -672,6 +684,15 @@ private:
                 break;
             case order_state_t::pending_new:
                 if (cfg_.ack_required) {
+                    return false;
+                }
+                break;
+            case order_state_t::pending_modify:
+                // Venues that chain replaces on the client order id accept a
+                // further modify while the previous one is unanswered. Waiting
+                // for the acknowledgement instead would put a round trip
+                // between the strategy deciding and the venue hearing it.
+                if (s.inflight_modifies >= cfg_.max_inflight_modifies) {
                     return false;
                 }
                 break;
@@ -750,6 +771,7 @@ private:
             return false;
         }
 
+        ++s.inflight_modifies;
         relink(to, si);
         if (prev_price != to.price || new_order_qty > prev_qty) {
             // Moving price or increasing size loses queue position, so the
@@ -817,6 +839,11 @@ private:
                 level_type* to = level_for(s.price);
                 if (to == nullptr) {
                     s.pending = pending_action_t::none;
+                    return;
+                }
+                if (!can_send_now(s)) {
+                    // Still no room in the chain. Leave the marker in place;
+                    // the outstanding requests will bring us back here.
                     return;
                 }
                 if (!issue_modify(si, *to, s.order_qty - s.filled - s.canceled)) {
@@ -1259,7 +1286,7 @@ private:
     // Event helpers
     // -----------------------------------------------------------------------
 
-    void on_confirmed(const order_id_t& id, price_t price, qty_t qty) noexcept {
+    void on_confirmed(const order_id_t& id, price_t price, qty_t qty, bool is_replace) noexcept {
         const slot_index_t si = lookup(id);
         if (si == k_null_slot) {
             return;
@@ -1269,7 +1296,13 @@ private:
         detach(s);
         s.acked_price = price;
         s.acked_qty = qty;
-        if (s.state == order_state_t::pending_new || s.state == order_state_t::pending_modify) {
+        if (is_replace && s.inflight_modifies > 0) {
+            --s.inflight_modifies;
+        }
+        // With a chain outstanding this is only an intermediate confirmation --
+        // the venue still owes us answers, so the order is not settled yet.
+        if (s.inflight_modifies == 0 && (s.state == order_state_t::pending_new ||
+                                         s.state == order_state_t::pending_modify)) {
             s.state = order_state_t::live;
         }
         attach(s);
@@ -1293,6 +1326,16 @@ private:
 
     void rollback_to_acked(slot_index_t si) noexcept {
         slot_type& s = pool_[si];
+
+        if (s.has_flag(slot_type::flag_orphaned)) {
+            // The grid was rebuilt underneath this order. It belongs to no
+            // level and must not be booked into one -- even when its old price
+            // happens to still exist on the new grid. It is only still tracked
+            // so its terminal event can be matched.
+            s.state = order_state_t::pending_cancel;
+            return;
+        }
+
         level_type* home = level_for(s.acked_price);
 
         detach(s);
@@ -1462,6 +1505,16 @@ bool stacker<Executor, Side, Traits>::validate() const noexcept {
         }
         if (s.has_flag(slot_type::flag_blocked_decrement)) {
             ++blocked;
+        }
+        if (s.inflight_modifies > cfg_.max_inflight_modifies) {
+            return false;
+        }
+        // An order with modifies outstanding cannot have been settled, so it
+        // must still be in one of the states that says the venue owes us an
+        // answer.
+        if (s.inflight_modifies > 0 && s.state != order_state_t::pending_modify &&
+            s.state != order_state_t::pending_cancel) {
+            return false;
         }
         if (s.has_flag(slot_type::flag_orphaned)) {
             if (s.has_flag(slot_type::flag_linked)) {

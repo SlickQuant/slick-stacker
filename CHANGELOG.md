@@ -26,6 +26,10 @@ First release.
 - Deferred actions for venues that will not act on an unacknowledged order
   (`ack_required`), including free reinstatement of a deferred cancel when the
   target returns.
+- `max_inflight_modifies` — chained replaces for venues that accept a modify
+  against an order whose previous one is still unanswered, removing a round trip
+  between the strategy deciding and the venue hearing about it. Defaults to 1,
+  which is the wait-for-the-answer behaviour.
 - Queue-gap gating (`queue_gap`, fed by `on_queue_position`), slack retention
   (`slack_levels`) and quantity hysteresis (`qty_hysteresis`).
 - Crossing protection via `on_opposite_top`.

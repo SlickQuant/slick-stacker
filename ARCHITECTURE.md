@@ -140,26 +140,45 @@ stacker keeps its slot index there instead and the table compiles away to an
 empty struct. Detection is a concept, so nothing is paid for the option when it
 is not taken.
 
-## At most one request per order
+## Outstanding requests per order
 
-An order never has more than one outstanding request. Anything the stacker wants
-to do while a request is in flight is recorded on the slot and sent from the
-acknowledgement.
-
-This is the single largest simplification in the design. Allowing chained
-modifies means keeping a per-order history of in-flight states, because a fill
-or a reject arriving mid-chain has to be unwound against the right link. One
-request per order means an order's state is a single enum and a deferred-action
-marker.
-
-The cost is latency on venues that require an acknowledgement before the next
-action — but on those venues the chain was never legal anyway.
+By default an order has at most one request outstanding. Anything the stacker
+wants to do while that request is in flight is recorded on the slot and sent
+from the acknowledgement.
 
 Because `price` and `order_qty` already hold what we want, the deferred action
 needs no payload of its own. It is purely a "still owe the venue a message"
 marker, and `desired()` reads through it: an order with a deferred cancel
 contributes zero to its level the moment the intent is formed, not when the
-message finally goes out.
+message finally goes out. Successive changes overwrite the marker, so intent is
+never lost — only delayed.
+
+Delayed is still a cost, though, and on a fast instrument it is the wrong one to
+pay: a round trip sits between the strategy deciding and the venue hearing about
+it. Venues that chain replaces on the client order id accept a modify against an
+order whose previous one is unanswered, and `max_inflight_modifies` lets the
+stacker use that.
+
+What makes chaining tractable is one byte on the slot: a count of modifies sent
+and not yet answered. Without it, `state` cannot distinguish "the venue has
+answered everything" from "the venue has answered the first of three", and a
+reject becomes ambiguous. With it:
+
+- An intermediate acknowledgement updates `acked_price`/`acked_qty` but leaves
+  the order in `pending_modify`, because later requests are still in the air.
+- A reject decrements the count. If anything is still outstanding, the reject is
+  absorbed and nothing is rolled back — a later request carries the real intent
+  and clobbering it would be wrong.
+- Once the count reaches zero, a reject rolls intent back to the last state the
+  venue actually confirmed, which by then is unambiguous.
+
+That is the whole mechanism. It does not need a history of in-flight states,
+because intent is always simply the latest one, and the only question a reject
+has to answer is whether it is the last word.
+
+The cost of raising it is exposure, not correctness: until the chain drains, the
+venue is working a quantity the stacker no longer intends. A chain deeper than
+the round trip is latency you are not getting back, so keep it small.
 
 ## The four passes
 

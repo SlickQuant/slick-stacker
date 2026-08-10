@@ -127,6 +127,7 @@ changed costs about two nanoseconds and sends nothing at all.
 | `qty_hysteresis` | Do not top a working level up for less than this. |
 | `queue_gap` | Market quantity required behind our last order before adding another at that price. |
 | `ack_required` | The venue will not act on an order it has not acknowledged. |
+| `max_inflight_modifies` | How many modifies may be outstanding against one order. 1 waits for each to be answered. |
 | `prefer_modify` | Reprice surplus orders instead of cancel-and-replace. |
 | `refill_on_fill` | Whether a fill re-arms the level automatically. |
 
@@ -140,6 +141,16 @@ cancel against an order it has not yet acknowledged. When true, the stacker
 records the action against the order and sends it from the acknowledgement. The
 level's accounting drops the quantity immediately either way, so nothing
 double-counts in the meantime.
+
+**`max_inflight_modifies`** — 1 by default, meaning a change waits for the
+modify already in flight to be answered. That is a round trip between the
+strategy deciding and the venue hearing about it. Venues that chain replaces on
+the client order id (CME among them) accept a modify against an order whose
+previous one is unanswered; raise this to use that. Intent is never lost either
+way — at 1 it is merely delayed — so this is a latency knob, and the price of
+raising it is that until the chain drains the venue is working a quantity you no
+longer intend. Independent of `ack_required`, which governs the *first* request
+against an order rather than subsequent ones.
 
 **`refill_on_fill`** — false by default. A fill reduces both the level's working
 quantity and its target, so the stack settles at what is left and waits. The
