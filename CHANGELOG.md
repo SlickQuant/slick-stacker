@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-08-10
 
 First release.
 
@@ -46,3 +46,5 @@ First release.
 - `validate()` — rebuilds level accounting from the underlying orders and
   compares against the incrementally maintained values.
 - 164 unit tests and two benchmark suites.
+
+[0.1.0]: https://github.com/SlickQuant/slick-stacker/releases/tag/v0.1.0
