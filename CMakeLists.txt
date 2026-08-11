@@ -14,6 +14,20 @@ option(SLICK_STACKER_BUILD_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
 option(SLICK_STACKER_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(SLICK_STACKER_BUILD_EXAMPLES "Build examples" OFF)
 
+# The version macros are generated from the project() version above, so the
+# number is written down once and the header cannot drift from it.
+#
+# It is generated into the source tree and committed, rather than into the build
+# tree, so that `include/` remains self-sufficient: the headers can still be
+# copied into a project that does not use CMake. `configure_file` rewrites the
+# file only when its content actually changes, so a configure with the version
+# untouched leaves the working tree clean.
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.hpp.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/slick/stacker/version.hpp"
+    @ONLY
+)
+
 add_library(slick-stacker INTERFACE)
 add_library(slick::stacker ALIAS slick-stacker)
 
