@@ -56,12 +56,29 @@ find_package(slick-stacker CONFIG REQUIRED)
 target_link_libraries(my_strategy PRIVATE slick::stacker)
 ```
 
+or fetched at configure time:
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(slick-stacker
+    GIT_REPOSITORY https://github.com/SlickQuant/slick-stacker.git
+    GIT_TAG        v0.1.0
+    GIT_SHALLOW    TRUE)
+FetchContent_MakeAvailable(slick-stacker)
+
+target_link_libraries(my_strategy PRIVATE slick::stacker)
+```
+
 or vendored:
 
 ```cmake
 add_subdirectory(external/slick-stacker)
 target_link_libraries(my_strategy PRIVATE slick::stacker)
 ```
+
+Tests build only when slick-stacker is the top-level project, and benchmarks and
+examples are off unless asked for, so consuming it any of these three ways costs
+nothing but the headers.
 
 ## The shape
 
