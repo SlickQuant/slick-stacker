@@ -30,7 +30,7 @@ public:
     using order_id_t = Id;
     static constexpr Id invalid_order_id = Id{};
 
-    using place_fn = std::function<Id(side_t, price_t, qty_t)>;
+    using place_fn = std::function<Id(side_t, price_t, qty_t, order_type_t)>;
     using modify_fn = std::function<bool(const Id&, price_t, qty_t)>;
     using cancel_fn = std::function<bool(const Id&)>;
     using flush_fn = std::function<void()>;
@@ -42,8 +42,8 @@ public:
           on_cancel(std::move(c)),
           on_flush(std::move(f)) {}
 
-    Id place(side_t s, price_t price, qty_t qty) {
-        return on_place ? on_place(s, price, qty) : invalid_order_id;
+    Id place(side_t s, price_t price, qty_t qty, order_type_t type) {
+        return on_place ? on_place(s, price, qty, type) : invalid_order_id;
     }
 
     bool modify(const Id& id, price_t price, qty_t qty) {

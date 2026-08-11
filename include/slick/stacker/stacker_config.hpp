@@ -144,6 +144,12 @@ struct stacker_config {
 
     // -- venue behaviour -----------------------------------------------------
 
+    /// What kind of order to send. Passed straight through to
+    /// `Executor::place`. Both kinds rest, so the two behave identically as far
+    /// as the stacker is concerned -- how long the venue keeps them is the
+    /// venue's business.
+    order_type_t order_type = order_type_t::limit;
+
     /// True when the venue will not accept a modify or cancel for an order it
     /// has not yet acknowledged. The stacker then defers the action onto the
     /// order slot and fires it from the acknowledgement.

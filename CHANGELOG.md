@@ -15,6 +15,11 @@ First release.
 - Order entry as a compile-time policy, constrained by the `OrderExecutor`
   concept. Optional `flush()`, `can_act()` and user-data hooks are detected and
   used when present.
+- `order_type` — `limit` (default) or `gtc`, passed to `Executor::place`. Only
+  resting kinds are offered: an order the venue kills on arrival cannot hold a
+  level of a ladder. Changing it at runtime, through `set_order_type()` or a
+  `configure()` carrying a different kind, cancels every working order and
+  replaces it with the new one — a modify cannot change an order's kind.
 - Ladder shape: `levels`, `level_gap_ticks`, a uniform `stack_qty` or a per-rung
   `qty_profile`, and `max_level_qty`.
 - Order sizing: `max_order_qty`, `min_order_qty`, `qty_increment` and
@@ -40,4 +45,4 @@ First release.
 - `function_executor` — a `std::function`-backed adapter for non-hot-path use.
 - `validate()` — rebuilds level accounting from the underlying orders and
   compares against the incrementally maintained values.
-- 137 unit tests and two benchmark suites.
+- 164 unit tests and two benchmark suites.

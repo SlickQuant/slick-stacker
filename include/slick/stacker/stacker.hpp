@@ -134,7 +134,9 @@ public:
     ///
     /// Runs four passes over the live band of levels: reprice surplus orders
     /// into levels that need quantity, shrink what is still over target, top up
-    /// what is still short, and release the levels that have gone quiet.
+    /// what is still short, and release the levels that have gone quiet. A
+    /// change of `order_type` prepends a fifth, which takes out the orders left
+    /// carrying the old kind.
     void reconcile() noexcept {
         if (!dirty_) {
             return;
@@ -150,6 +152,12 @@ public:
         }
 
         needs_retry_ = false;
+        // Before anything else: an order of the wrong kind is not a candidate
+        // for repricing or trimming, it is a candidate for removal. Taking it
+        // out first also frees the quantity for the add pass to put back.
+        if (retype_pending_) [[unlikely]] {
+            retype_pass();
+        }
         if (cfg_.prefer_modify) {
             reprice_pass();
         }
@@ -363,9 +371,11 @@ public:
     [[nodiscard]] const stacker_config& config() const noexcept { return cfg_; }
 
     /// Replace the whole configuration. `tick_size` changes force the price
-    /// grid to be rebuilt, which cancels everything currently working.
+    /// grid to be rebuilt, which cancels everything currently working, and
+    /// `order_type` changes cancel and replace it.
     void configure(const stacker_config& cfg) noexcept {
         const bool grid_changed = anchored_ && cfg.tick_size != cfg_.tick_size;
+        const bool type_changed = cfg.order_type != cfg_.order_type;
         cfg_ = cfg;
         cfg_.levels = std::min<std::uint16_t>(cfg_.levels, Traits::max_levels);
         cfg_.qty_profile = {};  // the span is copied below; do not retain it
@@ -373,7 +383,26 @@ public:
         if (grid_changed) {
             rebase(quote_price_);
         }
+        if (type_changed) {
+            arm_retype();
+        }
         shape_dirty_ = true;
+        dirty_ = true;
+    }
+
+    /// Change the kind of order the stacker sends.
+    ///
+    /// A modify carries price and quantity only, so orders already at the venue
+    /// cannot be amended into the new kind. The next `reconcile()` cancels them
+    /// and the add pass re-establishes each level with the new one -- the same
+    /// cancel-and-replace the stacker uses anywhere else an order cannot be
+    /// changed in place, and it costs two messages per working order.
+    void set_order_type(order_type_t type) noexcept {
+        if (type == cfg_.order_type) {
+            return;
+        }
+        cfg_.order_type = type;
+        arm_retype();
         dirty_ = true;
     }
 
@@ -860,7 +889,7 @@ private:
             note_retry();
             return false;
         }
-        const order_id_t id = exec_->place(Side, l.price, leaves);
+        const order_id_t id = exec_->place(Side, l.price, leaves, cfg_.order_type);
         if (id == Executor::invalid_order_id) [[unlikely]] {
             pool_.release(si);
             note_retry();
@@ -874,6 +903,7 @@ private:
         s.order_qty = leaves;
         s.acked_qty = 0;
         s.state = order_state_t::pending_new;
+        s.order_type = cfg_.order_type;
 
         link_back(l, si);
         attach(s);
@@ -1041,6 +1071,42 @@ private:
     // -----------------------------------------------------------------------
     // Reconcile passes
     // -----------------------------------------------------------------------
+
+    /// Note that the configured order type no longer matches what the working
+    /// orders were sent as, so the next reconcile has to take them out.
+    void arm_retype() noexcept { retype_pending_ = pool_.in_use() != 0; }
+
+    /// Cancel every working order the venue is holding as the wrong kind.
+    ///
+    /// The level's accounting drops each one the moment the cancel is formed,
+    /// exactly as it does for a cancel-and-replace anywhere else, so the add
+    /// pass later in the same reconcile puts the quantity back as the new kind.
+    /// Until those cancels are confirmed the venue is briefly holding both --
+    /// the price of a kind that cannot be modified in place.
+    ///
+    /// The pass is driven off the slots rather than a list of what to do, so it
+    /// is idempotent: it stays armed while any stale order is still standing,
+    /// and a refused cancel is simply retried on the next pass.
+    SLICK_STACKER_COLD SLICK_STACKER_NEVER_INLINE void retype_pass() noexcept {
+        bool remaining = false;
+        for (slot_index_t si = 0; si < Traits::max_orders; ++si) {
+            slot_type& s = pool_[si];
+            if (!s.active() || s.has_flag(slot_type::flag_orphaned) ||
+                s.order_type == cfg_.order_type) {
+                continue;
+            }
+            // Nothing of it is still wanted -- the cancel has gone out, or is
+            // booked against the acknowledgement. Either way it is on its way
+            // off the level and needs no second request.
+            if (s.desired() <= 0) {
+                continue;
+            }
+            if (!request_cancel(si)) {
+                remaining = true;
+            }
+        }
+        retype_pending_ = remaining;
+    }
 
     [[nodiscard]] bool wants_more(const level_type& l) const noexcept {
         const qty_t d = l.delta();
@@ -1250,7 +1316,10 @@ private:
         for (slot_index_t si = l.head; si != k_null_slot && need > 0;) {
             slot_type& s = pool_[si];
             const slot_index_t next = s.next;
-            if (s.pending == pending_action_t::cancel) {
+            // An order held back for a retype is not free quantity: it is the
+            // wrong kind, and reinstating it would undo the very cancel the
+            // retype pass just formed.
+            if (s.pending == pending_action_t::cancel && s.order_type == cfg_.order_type) {
                 const qty_t back = s.order_qty - s.filled - s.canceled;
                 if (back > 0 && back <= need) {
                     detach(s);
@@ -1385,6 +1454,7 @@ private:
     bool pulled_ = false;
     bool needs_retry_ = false;
     bool target_consumed_ = false;
+    bool retype_pending_ = false;
 };
 
 // ---------------------------------------------------------------------------

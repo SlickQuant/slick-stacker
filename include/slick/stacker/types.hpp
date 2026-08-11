@@ -48,6 +48,35 @@ enum class side_t : std::uint8_t {
     return s == side_t::buy ? "buy" : "sell";
 }
 
+/// What kind of order the stacker sends.
+///
+/// Every order it sends carries a price, so both of these are limit orders in
+/// the FIX sense; what differs is how long the venue keeps them. The names
+/// follow the usual trading-desk shorthand rather than splitting order type
+/// from time in force.
+///
+/// Both rest, which is the only property the stacker itself depends on: a level
+/// of a ladder is a resting order by definition. Immediate-or-cancel kinds have
+/// no place here -- an order the venue kills on arrival cannot hold a level, and
+/// a stacker that keeps replacing one is a machine gun. Send those directly.
+enum class order_type_t : std::uint8_t {
+    /// Rests until the end of the session. The default.
+    limit = 0,
+
+    /// Rests across sessions.
+    gtc,
+};
+
+[[nodiscard]] constexpr const char* to_string(order_type_t t) noexcept {
+    switch (t) {
+        case order_type_t::limit:
+            return "limit";
+        case order_type_t::gtc:
+            return "gtc";
+    }
+    return "unknown";
+}
+
 /// Lifecycle of a single working order.
 enum class order_state_t : std::uint8_t {
     free = 0,        ///< slot is on the free list

@@ -243,7 +243,7 @@ TEST(FunctionExecutor, DrivesAStackerLikeAnyOther) {
     std::uint64_t next = 1;
 
     function_executor<> exec{
-        [&](side_t, price_t px, qty_t q) {
+        [&](side_t, price_t px, qty_t q, slick::stacker::order_type_t) {
             log.push_back({'P', px, q});
             return next++;
         },

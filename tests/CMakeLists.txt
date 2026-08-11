@@ -24,6 +24,7 @@ add_executable(slick-stacker-tests
     test_stacker_slicing.cpp
     test_stacker_slack.cpp
     test_stacker_pair.cpp
+    test_stacker_order_type.cpp
 )
 
 target_link_libraries(slick-stacker-tests PRIVATE slick::stacker GTest::gtest_main)

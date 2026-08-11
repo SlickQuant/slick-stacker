@@ -79,6 +79,11 @@ struct order_slot {
     /// its own -- it is purely a "still owe the venue a message" marker.
     pending_action_t pending = pending_action_t::none;
 
+    /// The kind this order was sent to the venue as. A modify carries price and
+    /// quantity only, so an order whose kind no longer matches the configuration
+    /// cannot be amended into agreement -- it has to be cancelled and replaced.
+    order_type_t order_type = order_type_t::limit;
+
     std::uint8_t flags = 0;
 
     /// This order could not be reduced when the stack needed it to be, so the

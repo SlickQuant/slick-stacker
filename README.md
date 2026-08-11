@@ -19,7 +19,7 @@ struct my_executor {
     using order_id_t = std::uint64_t;
     static constexpr order_id_t invalid_order_id = 0;
 
-    order_id_t place(side_t side, price_t price, qty_t qty);
+    order_id_t place(side_t side, price_t price, qty_t qty, order_type_t type);
     bool       modify(const order_id_t& id, price_t price, qty_t qty);
     bool       cancel(const order_id_t& id);
 };
@@ -126,6 +126,7 @@ changed costs about two nanoseconds and sends nothing at all.
 | `slack_levels` | Rungs past the bottom that are kept rather than cancelled. |
 | `qty_hysteresis` | Do not top a working level up for less than this. |
 | `queue_gap` | Market quantity required behind our last order before adding another at that price. |
+| `order_type` | `limit` (default) or `gtc`. Passed to `place`. |
 | `ack_required` | The venue will not act on an order it has not acknowledged. |
 | `max_inflight_modifies` | How many modifies may be outstanding against one order. 1 waits for each to be answered. |
 | `prefer_modify` | Reprice surplus orders instead of cancel-and-replace. |
@@ -135,6 +136,23 @@ changed costs about two nanoseconds and sends nothing at all.
 or `config_error::ok`.
 
 ### Things worth knowing
+
+**`order_type`** — `limit` by default. Both kinds carry a price, so both are
+limit orders in the FIX sense; what differs is how long the venue keeps them,
+and that is the venue's business rather than the stacker's.
+
+There is deliberately no immediate-or-cancel option. A level of a ladder is a
+resting order by definition, and an order the venue kills on arrival cannot hold
+one — the level would look short again straight away and the next reconcile
+would send another, forever. Send those directly rather than through a stacker.
+
+Changing it at runtime — `set_order_type(t)`, or a `configure()` carrying a
+different one — cancels every working order and replaces it with the new kind on
+the next `reconcile()`. A modify carries price and quantity only, so there is no
+amending an order into a different kind; two messages per working order is what
+the change costs. Between the cancel and its confirmation the venue is briefly
+holding both, exactly as it is for any other cancel-and-replace. Set it once at
+startup unless you mean to pay that.
 
 **`ack_required`** — set it true unless you know your venue accepts a modify or
 cancel against an order it has not yet acknowledged. When true, the stacker

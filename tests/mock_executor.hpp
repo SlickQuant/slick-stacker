@@ -11,6 +11,7 @@
 
 namespace testing_support {
 
+using slick::stacker::order_type_t;
 using slick::stacker::price_t;
 using slick::stacker::qty_t;
 using slick::stacker::side_t;
@@ -32,6 +33,7 @@ public:
         side_t side;
         price_t price;
         qty_t qty;
+        order_type_t order_type = order_type_t::limit;  ///< only set on `place`
     };
 
     struct venue_order {
@@ -41,18 +43,19 @@ public:
         qty_t qty = 0;      ///< total order quantity as last acknowledged/requested
         qty_t filled = 0;
         bool live = true;
+        order_type_t order_type = order_type_t::limit;
     };
 
     // -- executor interface --------------------------------------------------
 
-    order_id_t place(side_t s, price_t px, qty_t q) {
+    order_id_t place(side_t s, price_t px, qty_t q, order_type_t type) {
         if (fail_place) {
             ++refused;
             return invalid_order_id;
         }
         const order_id_t id = next_id_++;
-        log.push_back({kind::place, id, s, px, q});
-        orders[id] = venue_order{id, s, px, q, 0, true};
+        log.push_back({kind::place, id, s, px, q, type});
+        orders[id] = venue_order{id, s, px, q, 0, true, type};
         return id;
     }
 

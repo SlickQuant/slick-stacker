@@ -10,6 +10,7 @@
 
 namespace bench_support {
 
+using slick::stacker::order_type_t;
 using slick::stacker::price_t;
 using slick::stacker::qty_t;
 using slick::stacker::side_t;
@@ -33,7 +34,7 @@ struct bench_executor {
 
     bench_executor() { pending.reserve(4096); }
 
-    order_id_t place(side_t, price_t price, qty_t qty) {
+    order_id_t place(side_t, price_t price, qty_t qty, order_type_t) {
         const order_id_t id = next_id++;
         pending.push_back({k_place, id, price, qty});
         return id;

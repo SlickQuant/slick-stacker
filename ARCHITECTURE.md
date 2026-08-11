@@ -221,6 +221,9 @@ against `max_order_qty`, `min_order_qty`, `qty_increment`, `max_level_qty` and
 
 **4. Release.** Pull the band in around what is left.
 
+A fifth runs ahead of all of them, but only after `order_type` has changed —
+see below.
+
 ## Guards
 
 **Overfill.** A reduction the executor refuses to send is real exposure: the
@@ -246,6 +249,40 @@ top level is never gated — that is the quote itself.
 **Retry.** A refused message leaves work undone with no event coming to wake the
 stacker up again, so the dirty flag is re-armed and the next pass tries once
 more.
+
+That retry rule is also why `order_type` offers only resting kinds. An
+immediate-or-cancel order is killed by the venue on arrival, the level looks
+short, and the next reconcile sends another — a machine gun assembled from two
+individually reasonable rules. Rather than bolt on a special case to suppress
+it, the type is simply not offered: a level of a ladder is a resting order by
+definition, and aggressive orders belong somewhere other than a stacker.
+
+## Changing the order type
+
+A modify carries price and quantity. It cannot turn a day order into a GTC one,
+so when `order_type` changes, every order already at the venue is of a kind the
+stacker can no longer express an intent about — it can only take it out and send
+another. That is the retype pass, and it runs ahead of the other four: an order
+of the wrong kind is not a candidate for repricing or trimming, and cancelling
+it first hands its quantity to the add pass, which puts it straight back as the
+new kind. One cancel and one place per working order, in a single reconcile.
+
+Two details make it behave under stress. It is driven off the slots rather than
+a list of what to do — "cancel every order whose kind is not the configured
+one" is a pure function of state — so it is idempotent, and a refused cancel is
+simply retried on the next pass rather than silently leaving an order of the
+wrong kind standing forever. And the add pass, which normally treats a deferred
+cancel at a level as the cheapest quantity going, will not reclaim one held back
+for a retype: reinstating it would undo the very cancel the pass just formed.
+
+The cost is the ordinary cost of a cancel-and-replace, paid across the whole
+stack at once: until each cancel is confirmed the venue is briefly holding both
+orders. Nothing about that is specific to the retype — it is why the type is
+meant to be chosen at startup rather than moved around at runtime.
+
+Each slot carries the kind it was sent as, one byte alongside `pending` and
+`flags` in space the layout was padding anyway. It is what makes the pass a
+state comparison instead of bookkeeping.
 
 ## Slack and hysteresis
 

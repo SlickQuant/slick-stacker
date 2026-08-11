@@ -33,16 +33,18 @@ concept OrderIdLike =
 /// retries.
 ///
 /// None of the three may call back into the stacker.
+/// `place` receives the configured `order_type_t`; a replace does not, because
+/// changing an order's kind mid-life is not something the stacker ever asks for.
 template <class E>
-concept OrderExecutor =
-    requires(E& e, side_t s, price_t px, qty_t q, const typename E::order_id_t& id) {
-        typename E::order_id_t;
-        requires OrderIdLike<typename E::order_id_t>;
-        { E::invalid_order_id } -> std::convertible_to<typename E::order_id_t>;
-        { e.place(s, px, q) } -> std::same_as<typename E::order_id_t>;
-        { e.modify(id, px, q) } -> std::same_as<bool>;
-        { e.cancel(id) } -> std::same_as<bool>;
-    };
+concept OrderExecutor = requires(E& e, side_t s, price_t px, qty_t q, order_type_t ot,
+                                 const typename E::order_id_t& id) {
+    typename E::order_id_t;
+    requires OrderIdLike<typename E::order_id_t>;
+    { E::invalid_order_id } -> std::convertible_to<typename E::order_id_t>;
+    { e.place(s, px, q, ot) } -> std::same_as<typename E::order_id_t>;
+    { e.modify(id, px, q) } -> std::same_as<bool>;
+    { e.cancel(id) } -> std::same_as<bool>;
+};
 
 /// Optional. When present, the stacker calls it once per reconcile after the
 /// last message, so an executor that batches into a single gateway write can

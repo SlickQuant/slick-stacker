@@ -32,11 +32,11 @@ public:
         qty_t qty;
     };
 
-    order_id_t place(side_t s, price_t price, qty_t qty) {
+    order_id_t place(side_t s, price_t price, qty_t qty, order_type_t type) {
         const order_id_t id = next_id_++;
-        std::printf("  -> PLACE  %-4s %6lld x %-4lld  (id %llu)\n",
+        std::printf("  -> PLACE  %-4s %6lld x %-4lld %-5s (id %llu)\n",
                     to_string(s), static_cast<long long>(price), static_cast<long long>(qty),
-                    static_cast<unsigned long long>(id));
+                    to_string(type), static_cast<unsigned long long>(id));
         queue_.push_back({'P', id, price, qty});
         return id;
     }
