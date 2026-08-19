@@ -28,8 +28,12 @@ using slot_index_t = std::uint16_t;
 /// Sentinel for "no slot".
 inline constexpr slot_index_t k_null_slot = std::numeric_limits<slot_index_t>::max();
 
-/// Sentinel meaning "no price".
-inline constexpr price_t k_null_price = std::numeric_limits<price_t>::min();
+/// Sentinel meaning "no price". Deliberately the same shape as
+/// `k_no_qty_limit`: the top of the type's range. Every use of it is an
+/// equality test -- see `crossing_ok()` and `stacker_pair::tighter()`, both of
+/// which check for it before any ordering comparison -- so the value carries no
+/// directional meaning and must never itself be compared with `<` or `>`.
+inline constexpr price_t k_null_price = std::numeric_limits<price_t>::max();
 
 /// Sentinel meaning "unbounded" for the quantity limits in `stacker_config`.
 inline constexpr qty_t k_no_qty_limit = std::numeric_limits<qty_t>::max();

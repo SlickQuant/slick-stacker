@@ -13,9 +13,9 @@
 
 #define SLICK_STACKER_VERSION_MAJOR 0
 #define SLICK_STACKER_VERSION_MINOR 1
-#define SLICK_STACKER_VERSION_PATCH 0
+#define SLICK_STACKER_VERSION_PATCH 1
 
-#define SLICK_STACKER_VERSION_STRING "0.1.0"
+#define SLICK_STACKER_VERSION_STRING "0.1.1"
 
 /// The three parts as one integer, so a dependent can gate on a release:
 /// `#if SLICK_STACKER_VERSION >= 10200` for 1.2.0 or later.

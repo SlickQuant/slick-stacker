@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-19
+
 ### Added
 
 - `SLICK_STACKER_VERSION_STRING` — the version as a string literal.
@@ -20,6 +22,13 @@ All notable changes to this project are documented here. The format follows
   the `project()` call, and the header cannot drift from it. The generated file
   is committed alongside the hand-written headers, so `include/` still stands on
   its own for anyone consuming it without CMake.
+- `k_null_price` is now the top of `price_t`'s range rather than the bottom,
+  matching the shape of `k_no_qty_limit` and the "no price" sentinel used by
+  common trading frameworks, which removes a translation step at the integration
+  boundary. Every use of the constant inside the library is an equality test
+  evaluated before any ordering comparison, so behaviour is unchanged — but any
+  consumer that hardcoded the literal instead of using the constant must be
+  updated.
 
 ## [0.1.0] - 2026-08-10
 
