@@ -17,7 +17,8 @@ struct default_traits {
     /// Number of price levels the ring can address at once. Must be a power of
     /// two. The ring spans +/- `level_capacity/2` ticks of quote travel while
     /// orders remain live, so it needs to comfortably exceed the deepest stack
-    /// plus the largest price jump you expect between reconciles.
+    /// plus the largest price jump you expect between reconciles. A ladder that
+    /// does not fit at all is rejected by `stacker_config::validate`.
     static constexpr std::uint16_t level_capacity = 256;
 
     /// Maximum number of simultaneously tracked orders across all levels.
@@ -39,6 +40,7 @@ enum class config_error : std::uint8_t {
     max_order_qty_below_min,
     max_orders_per_level_zero,
     max_inflight_modifies_zero,
+    ladder_exceeds_capacity,
 };
 
 [[nodiscard]] constexpr const char* to_string(config_error e) noexcept {
@@ -63,6 +65,8 @@ enum class config_error : std::uint8_t {
             return "max_orders_per_level must be > 0";
         case config_error::max_inflight_modifies_zero:
             return "max_inflight_modifies must be > 0";
+        case config_error::ladder_exceeds_capacity:
+            return "(levels + slack_levels) * level_gap_ticks must be < Traits::level_capacity";
     }
     return "unknown";
 }
@@ -188,6 +192,20 @@ struct stacker_config {
     /// replenish itself back to target after every fill.
     bool refill_on_fill = false;
 
+    /// Most rungs whose ladder, slack included, still fits in the price ring of
+    /// `Traits`: `(levels + slack_levels) * level_gap_ticks` ticks must stay
+    /// under `level_capacity`. A wider ladder aliases rungs onto one ring slot
+    /// and leaves the live band wider than the ring, so every quote move would
+    /// rebuild the grid and cancel the whole stack.
+    template <class Traits = default_traits>
+    [[nodiscard]] constexpr std::uint16_t max_fitting_levels() const noexcept {
+        if (level_gap_ticks == 0) {
+            return 0;
+        }
+        const std::uint32_t rungs = (Traits::level_capacity - 1u) / level_gap_ticks;
+        return rungs > slack_levels ? static_cast<std::uint16_t>(rungs - slack_levels) : 0;
+    }
+
     /// Validate against the sizing limits of `Traits`.
     template <class Traits = default_traits>
     [[nodiscard]] constexpr config_error validate() const noexcept {
@@ -199,6 +217,9 @@ struct stacker_config {
         }
         if (levels > Traits::max_levels) {
             return config_error::too_many_levels;
+        }
+        if (levels > max_fitting_levels<Traits>()) {
+            return config_error::ladder_exceeds_capacity;
         }
         if (!qty_profile.empty() && qty_profile.size() != levels) {
             return config_error::qty_profile_size_mismatch;

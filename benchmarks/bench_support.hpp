@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <benchmark/benchmark.h>
 #include <slick/stacker/stacker.hpp>
 
 #include <cstdint>
@@ -36,18 +37,27 @@ struct bench_executor {
 
     order_id_t place(side_t, price_t price, qty_t qty, order_type_t) {
         const order_id_t id = next_id++;
-        pending.push_back({k_place, id, price, qty});
+        send({k_place, id, price, qty});
         return id;
     }
 
     bool modify(const order_id_t& id, price_t price, qty_t qty) {
-        pending.push_back({k_modify, id, price, qty});
+        send({k_modify, id, price, qty});
         return true;
     }
 
     bool cancel(const order_id_t& id) {
-        pending.push_back({k_cancel, id, 0, 0});
+        send({k_cancel, id, 0, 0});
         return true;
+    }
+
+    /// Queue a message and fold it into `checksum`, so every message the
+    /// stacker decides to send is part of what the benchmark observes.
+    void send(const message& m) {
+        pending.push_back(m);
+        checksum = checksum * 31 + (m.id ^ static_cast<std::uint64_t>(m.price) ^
+                                    (static_cast<std::uint64_t>(m.qty) << 32) ^ m.kind);
+        ++sent;
     }
 
     /// Acknowledge everything queued. Draining an acknowledgement can itself
@@ -74,7 +84,30 @@ struct bench_executor {
 
     std::vector<message> pending;
     order_id_t next_id = 1;
+    std::uint64_t checksum = 0;  ///< running hash of every message sent
+    std::uint64_t sent = 0;      ///< messages sent since construction
 };
+
+/// End-of-iteration sink. Escapes the stacker and the executor's message
+/// checksum and clobbers memory, so the optimiser has to assume the stacker's
+/// state is read afterwards and can neither drop nor simplify the work the
+/// iteration did to it.
+template <class Stacker, class Executor>
+inline void keep(Stacker& st, Executor& exec) {
+    benchmark::DoNotOptimize(st);
+    benchmark::DoNotOptimize(exec.checksum);
+    benchmark::ClobberMemory();
+}
+
+/// Messages per iteration, reported as a counter so a change in what a
+/// benchmark actually sends is visible next to a change in its time.
+template <class Executor>
+inline void report_messages(benchmark::State& state, const Executor& exec,
+                            std::uint64_t sent_before) {
+    const auto iters = state.iterations() != 0 ? state.iterations() : 1;
+    state.counters["msgs/iter"] =
+        static_cast<double>(exec.sent - sent_before) / static_cast<double>(iters);
+}
 
 /// Adds the optional user-data slot, which replaces the identifier hash with a
 /// direct index on every event.

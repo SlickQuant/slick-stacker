@@ -270,6 +270,60 @@ TEST(StackerReprice, TerminatesWhenNothingCanBeMoved) {
     EXPECT_CONSISTENT(h);
 }
 
+// Each move used to restart the scan of the source level at its tail, so an
+// order at the tail that could not move was tried again for every order moved
+// from in front of it. For an order the executor refuses, that meant a fresh
+// refused modify each time. The scan now resumes where it left off.
+TEST(StackerReprice, UnmovableTailOrderIsTriedOncePerPass) {
+    auto cfg = base_cfg();
+    cfg.max_order_qty = 10;
+    buy_harness h{cfg};
+
+    h.quote(1000, 40);
+    h.ack_all();
+    ASSERT_EQ(h.orders_at(1000), 4u);
+    const auto tail = h.exec.log[3].id;
+    h.exec.refuse_modify_id = tail;
+
+    const auto mark = h.exec.mark();
+    h.quote(1010, 40);
+
+    EXPECT_EQ(h.exec.refused, 1u) << "the refused tail order was retried";
+    EXPECT_EQ(h.exec.count(mock_executor::kind::modify, mark), 3u)
+        << "the three orders in front of it still moved";
+    EXPECT_EQ(h.working(1010), 40);
+    EXPECT_EQ(h.working(1000), 0);
+    EXPECT_CONSISTENT(h);
+}
+
+// A destination that cannot take a reprice -- here because it would cross --
+// is the destination cursor's problem. It used to exhaust the source cursor
+// instead, so nothing further down the band was repriced either.
+TEST(StackerReprice, BlockedDestinationDoesNotStopRepricesBehindIt) {
+    auto cfg = base_cfg();
+    cfg.levels = 2;
+    cfg.stack_qty = 10;
+    buy_harness h{cfg};
+
+    h.quote(1000, 25);
+    h.ack_all();
+    ASSERT_EQ(h.working(980), 10);
+
+    h.st.on_opposite_top(1020);
+    const auto mark = h.exec.mark();
+    h.quote(1020, 25);
+    h.ack_all();
+
+    EXPECT_EQ(h.working(1020), 0) << "the quote itself would cross";
+    EXPECT_EQ(h.working(1010), 10);
+    EXPECT_EQ(h.working(1000), 10);
+    EXPECT_EQ(h.working(990), 0);
+    EXPECT_EQ(h.working(980), 0);
+    EXPECT_EQ(h.exec.count(mock_executor::kind::place, mark), 0u)
+        << "1010 is filled by moving the order from 980, not by a new one";
+    EXPECT_CONSISTENT(h);
+}
+
 TEST(StackerReprice, RepeatedWalkKeepsOneOrderAlive) {
     buy_harness h{base_cfg()};
     h.quote(1000, 20);

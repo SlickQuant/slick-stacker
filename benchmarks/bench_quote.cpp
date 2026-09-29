@@ -30,13 +30,13 @@ static void BM_RequoteUnchanged(benchmark::State& state) {
     st.reconcile();
     exec.drain(st);
 
+    const auto sent = exec.sent;
     for (auto _ : state) {
         st.quote(k_base, 25);
         st.reconcile();
-        benchmark::DoNotOptimize(exec.pending.size());
+        keep(st, exec);
     }
-    state.counters["messages"] = benchmark::Counter(
-        static_cast<double>(exec.next_id - 1), benchmark::Counter::kAvgThreads);
+    report_messages(state, exec, sent);
 }
 BENCHMARK(BM_RequoteUnchanged)->Arg(1)->Arg(4)->Arg(8)->Arg(16);
 
@@ -49,13 +49,16 @@ static void BM_RequoteTopSizeOnly(benchmark::State& state) {
     st.reconcile();
     exec.drain(st);
 
+    const auto sent = exec.sent;
     qty_t size = 25;
     for (auto _ : state) {
         size = size == 25 ? 26 : 25;
         st.quote(k_base, size);
         st.reconcile();
         exec.drain(st);
+        keep(st, exec);
     }
+    report_messages(state, exec, sent);
 }
 BENCHMARK(BM_RequoteTopSizeOnly)->Arg(1)->Arg(4)->Arg(8)->Arg(16);
 
@@ -70,19 +73,16 @@ static void BM_WalkOneTick(benchmark::State& state) {
     st.reconcile();
     exec.drain(st);
 
+    const auto sent = exec.sent;
     bool up = true;
-    std::uint64_t messages = 0;
-    std::uint64_t steps = 0;
     for (auto _ : state) {
         up = !up;
         st.quote(up ? k_base + k_tick : k_base, 25);
         st.reconcile();
-        messages += exec.pending.size();
         exec.drain(st);
-        ++steps;
+        keep(st, exec);
     }
-    state.counters["msgs/step"] =
-        benchmark::Counter(static_cast<double>(messages) / static_cast<double>(steps ? steps : 1));
+    report_messages(state, exec, sent);
 }
 BENCHMARK(BM_WalkOneTick)->Arg(1)->Arg(4)->Arg(8)->Arg(16);
 
@@ -95,13 +95,16 @@ static void BM_JumpWholeStack(benchmark::State& state) {
     st.reconcile();
     exec.drain(st);
 
+    const auto sent = exec.sent;
     bool high = false;
     for (auto _ : state) {
         high = !high;
         st.quote(high ? k_base + 40 * k_tick : k_base, 25);
         st.reconcile();
         exec.drain(st);
+        keep(st, exec);
     }
+    report_messages(state, exec, sent);
 }
 BENCHMARK(BM_JumpWholeStack)->Arg(1)->Arg(4)->Arg(8)->Arg(16);
 
@@ -113,6 +116,7 @@ static void BM_PullAndRebuild(benchmark::State& state) {
     st.reconcile();
     exec.drain(st);
 
+    const auto sent = exec.sent;
     for (auto _ : state) {
         st.pull();
         st.reconcile();
@@ -120,7 +124,9 @@ static void BM_PullAndRebuild(benchmark::State& state) {
         st.quote(k_base, 25);
         st.reconcile();
         exec.drain(st);
+        keep(st, exec);
     }
+    report_messages(state, exec, sent);
 }
 BENCHMARK(BM_PullAndRebuild)->Arg(1)->Arg(4)->Arg(8)->Arg(16);
 
@@ -135,15 +141,47 @@ static void BM_WalkWithSlicing(benchmark::State& state) {
     st.reconcile();
     exec.drain(st);
 
+    const auto sent = exec.sent;
     bool up = true;
     for (auto _ : state) {
         up = !up;
         st.quote(up ? k_base + k_tick : k_base, 40);
         st.reconcile();
         exec.drain(st);
+        keep(st, exec);
     }
+    report_messages(state, exec, sent);
     state.counters["orders"] = benchmark::Counter(static_cast<double>(st.live_order_count()));
 }
 BENCHMARK(BM_WalkWithSlicing)->Arg(40)->Arg(10)->Arg(5);
+
+// Every level is a deep queue of our own one-lot orders, so a one-tick walk
+// moves forty orders out of one level. The reprice pass walks the source queue
+// once rather than restarting at its tail after every move, so this should
+// scale with the number of orders moved and nothing worse.
+static void BM_WalkDeepQueue(benchmark::State& state) {
+    bench_executor exec;
+    auto cfg = make_config(4);
+    cfg.stack_qty = 40;
+    cfg.max_order_qty = 1;
+    cfg.max_orders_per_level = 64;
+    stacker_type st{exec, cfg};
+    st.quote(k_base, 40);
+    st.reconcile();
+    exec.drain(st);
+
+    const auto sent = exec.sent;
+    bool up = true;
+    for (auto _ : state) {
+        up = !up;
+        st.quote(up ? k_base + k_tick : k_base, 40);
+        st.reconcile();
+        exec.drain(st);
+        keep(st, exec);
+    }
+    report_messages(state, exec, sent);
+    state.counters["orders"] = benchmark::Counter(static_cast<double>(st.live_order_count()));
+}
+BENCHMARK(BM_WalkDeepQueue);
 
 BENCHMARK_MAIN();

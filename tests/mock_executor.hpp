@@ -60,7 +60,7 @@ public:
     }
 
     bool modify(const order_id_t& id, price_t px, qty_t q) {
-        if (fail_modify) {
+        if (fail_modify || id == refuse_modify_id) {
             ++refused;
             return false;
         }
@@ -157,6 +157,7 @@ public:
     bool fail_place = false;
     bool fail_modify = false;
     bool fail_cancel = false;
+    order_id_t refuse_modify_id = invalid_order_id;  ///< refuse modifies of this order only
     std::size_t refused = 0;
     std::size_t flushes = 0;
 

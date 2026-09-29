@@ -124,7 +124,7 @@ bid.reconcile();   // one pass for the whole batch
 
 A burst of twenty fills costs one recalculation rather than twenty, and no
 intermediate state ever reaches the wire. Re-asserting a quote that has not
-changed costs about two nanoseconds and sends nothing at all.
+changed costs a few nanoseconds and sends nothing at all.
 
 ## Configuration
 
@@ -132,7 +132,7 @@ changed costs about two nanoseconds and sends nothing at all.
 | --- | --- |
 | `tick_size` | Minimum price increment. All ladder prices are multiples of this. |
 | `levels` | Rungs behind the quote. The quote itself is not counted. |
-| `level_gap_ticks` | Tick spacing between rungs. `1` is a contiguous ladder. |
+| `level_gap_ticks` | Tick spacing between rungs. `1` is a contiguous ladder. `(levels + slack_levels) * level_gap_ticks` must stay under `Traits::level_capacity`. |
 | `stack_qty` | Uniform rung size, used when `qty_profile` is empty. |
 | `qty_profile` | Per-rung sizes, nearest rung first. Copied, not retained. |
 | `max_level_qty` | Cap on total resting quantity at any one price. |
@@ -150,7 +150,10 @@ changed costs about two nanoseconds and sends nothing at all.
 | `refill_on_fill` | Whether a fill re-arms the level automatically. |
 
 `cfg.validate<Traits>()` returns a `config_error` describing the first problem,
-or `config_error::ok`.
+or `config_error::ok`. The stacker does not require a validated config; it
+clamps `levels` to `Traits::max_levels` and to what fits in the price ring at
+the configured gap and slack (`cfg.max_fitting_levels<Traits>()`), which
+`validate` reports as `ladder_exceeds_capacity`.
 
 ### Things worth knowing
 
@@ -194,7 +197,9 @@ true if automatic replenishment is what you want.
 
 **`queue_gap`** — needs `on_queue_position` to be fed. Without it a non-zero
 `queue_gap` holds every level to a single order. Leave it at zero if you have no
-queue-position feed.
+queue-position feed. `on_book_level` and `on_queue_position` are cheap to call
+either way: they record the value but only mark the stacker dirty when the gate
+is on and the update could release a level it is holding back.
 
 ## Both sides
 
@@ -260,7 +265,7 @@ std::uint32_t get_order_user_data(const order_id_t& id) const;
 ```
 
 The hash table then compiles away entirely and every event handler becomes a
-single indexed load. Worth about 25% of the routing cost.
+single indexed load. Worth about 15-25% of the routing cost.
 
 Two other optional methods are picked up the same way:
 
@@ -271,16 +276,17 @@ bool can_act(const order_id_t& id); // veto acting on an order the gateway knows
 
 ## Performance
 
-Release build, GCC/MSVC `-O3`, single core. See `docs/PERFORMANCE.md` for the
-full set and how to reproduce.
+MSVC 19.44 Release (`/O2`), one pinned core of a Ryzen 9 5900HX that was not
+idle, so read these as upper bounds. See `docs/PERFORMANCE.md` for the full set,
+the exact environment, and how to reproduce.
 
 | Operation | 4 rungs |
 | --- | --- |
-| Re-assert an unchanged quote | ~1.9 ns |
-| Change the top level size | ~88 ns |
-| Walk the quote one tick | ~166 ns, 2 messages, nothing placed |
-| Route an order event | ~2.7 ns hashed, ~2.0 ns with user data |
-| Apply a fill | ~5.7 ns |
+| Re-assert an unchanged quote | ~6 ns |
+| Change the top level size | ~220 ns |
+| Walk the quote one tick | ~480 ns, 2 messages, nothing placed |
+| Route an order event | ~9 ns hashed, ~7 ns with user data |
+| Apply a fill | ~48 ns |
 
 ## Building and testing
 

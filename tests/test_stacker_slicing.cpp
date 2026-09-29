@@ -200,6 +200,93 @@ TEST(StackerSlicing, QueueGapDoesNotGateTheTopLevel) {
     EXPECT_CONSISTENT(h);
 }
 
+// With the gate off nothing reads book or queue data, so a busy feed must not
+// drag a full reconcile behind every update.
+TEST(StackerSlicing, QueueFeedWithTheGateOffDoesNotDirty) {
+    auto cfg = base_cfg();
+    cfg.levels = 1;
+    cfg.stack_qty = 30;
+    cfg.max_order_qty = 10;
+    cfg.queue_gap = 0;
+    buy_harness h{cfg};
+
+    h.quote(1000, 10);
+    h.settle();
+    ASSERT_FALSE(h.st.dirty());
+    const auto id = h.exec.log[1].id;
+
+    h.st.on_book_level(990, 200);
+    h.st.on_queue_position(id, 100);
+    EXPECT_FALSE(h.st.dirty());
+    EXPECT_CONSISTENT(h);
+}
+
+// With the gate on, only an update that could open it is worth a reconcile: a
+// change at a level that is being held back, to the order the gate looks at.
+TEST(StackerSlicing, QueueFeedDirtiesOnlyALevelHeldByTheGate) {
+    auto cfg = base_cfg();
+    cfg.levels = 2;
+    cfg.stack_qty = 30;
+    cfg.max_order_qty = 10;
+    cfg.queue_gap = 50;
+    buy_harness h{cfg};
+
+    h.quote(1000, 10);
+    h.settle();
+    ASSERT_FALSE(h.st.dirty());
+    ASSERT_EQ(h.orders_at(990), 1u);
+    const auto top_id = h.exec.log[0].id;
+    const auto held_id = h.exec.log[1].id;
+    ASSERT_EQ(h.exec.orders[top_id].price, 1000);
+    ASSERT_EQ(h.exec.orders[held_id].price, 990);
+
+    // The top level is never gated, and the price has no level of ours.
+    h.st.on_queue_position(top_id, 5);
+    h.st.on_book_level(1000, 500);
+    h.st.on_book_level(950, 500);
+    EXPECT_FALSE(h.st.dirty());
+
+    // Level 990 wants 30 and holds 10, so it is waiting on the gate.
+    h.st.on_book_level(990, 120);
+    EXPECT_TRUE(h.st.dirty());
+    h.settle();
+    h.st.on_queue_position(held_id, 100);
+    EXPECT_TRUE(h.st.dirty());
+    h.settle();
+    EXPECT_EQ(h.orders_at(990), 1u) << "only 20 behind us, short of 50";
+
+    // Re-publishing the same numbers changes nothing.
+    h.st.on_book_level(990, 120);
+    h.st.on_queue_position(held_id, 100);
+    EXPECT_FALSE(h.st.dirty());
+
+    // Enough queue behind us now.
+    h.st.on_book_level(990, 200);
+    EXPECT_TRUE(h.st.dirty());
+    h.settle();
+    EXPECT_EQ(h.orders_at(990), 2u);
+    EXPECT_CONSISTENT(h);
+}
+
+TEST(StackerSlicing, QueueFeedDoesNotDirtyALevelThatIsFull) {
+    auto cfg = base_cfg();
+    cfg.levels = 1;
+    cfg.stack_qty = 10;
+    cfg.max_order_qty = 10;
+    cfg.queue_gap = 50;
+    buy_harness h{cfg};
+
+    h.quote(1000, 10);
+    h.settle();
+    ASSERT_EQ(h.working(990), 10);
+    const auto id = h.exec.log[1].id;
+
+    h.st.on_book_level(990, 200);
+    h.st.on_queue_position(id, 100);
+    EXPECT_FALSE(h.st.dirty()) << "990 is at target; the gate is not holding it";
+    EXPECT_CONSISTENT(h);
+}
+
 TEST(StackerSlicing, ZeroQueueGapDisablesTheGate) {
     auto cfg = base_cfg();
     cfg.levels = 1;

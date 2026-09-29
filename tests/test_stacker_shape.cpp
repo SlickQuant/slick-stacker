@@ -376,3 +376,64 @@ TEST(StackerShape, ConfigValidation) {
     EXPECT_EQ(cfg.validate<test_traits>(),
               slick::stacker::config_error::max_inflight_modifies_zero);
 }
+
+// The ladder, slack included, has to fit inside the price ring. `test_traits`
+// has 64 slots, so the widest ladder allowed spans 63 ticks.
+TEST(StackerShape, ConfigValidationRejectsALadderWiderThanTheRing) {
+    using slick::stacker::config_error;
+    using slick::stacker::default_traits;
+
+    auto cfg = base_cfg();
+    cfg.levels = 16;
+    cfg.level_gap_ticks = 3;  // 48 ticks
+    EXPECT_EQ(cfg.validate<test_traits>(), config_error::ok);
+
+    cfg.level_gap_ticks = 4;  // 64 ticks: the deepest rung aliases the quote
+    EXPECT_EQ(cfg.validate<test_traits>(), config_error::ladder_exceeds_capacity);
+
+    cfg.level_gap_ticks = 3;
+    cfg.slack_levels = 5;  // (16 + 5) * 3 = 63
+    EXPECT_EQ(cfg.validate<test_traits>(), config_error::ok);
+    cfg.slack_levels = 6;  // 66
+    EXPECT_EQ(cfg.validate<test_traits>(), config_error::ladder_exceeds_capacity);
+
+    cfg = base_cfg();
+    cfg.levels = 64;
+    cfg.level_gap_ticks = 255;
+    EXPECT_EQ(cfg.validate<default_traits>(), config_error::ladder_exceeds_capacity);
+    cfg.level_gap_ticks = 256;
+    EXPECT_EQ(cfg.validate<default_traits>(), config_error::ladder_exceeds_capacity);
+    cfg.level_gap_ticks = 3;  // 192 of 256
+    EXPECT_EQ(cfg.validate<default_traits>(), config_error::ok);
+}
+
+// A stacker is not required to be given a validated config. One whose ladder is
+// wider than the ring used to leave the live band wider than the ring, so every
+// quote move rebuilt the grid and cancelled the whole stack. The ladder is now
+// clamped to what fits.
+TEST(StackerShape, LadderWiderThanTheRingIsClampedAndNeverRebases) {
+    auto cfg = base_cfg();
+    cfg.levels = 16;
+    cfg.level_gap_ticks = 5;  // 80 ticks against a 64-slot ring
+    buy_harness h{cfg};
+    EXPECT_EQ(h.st.config().levels, 12u) << "63 / 5 rungs fit";
+
+    h.quote(1000, 25);
+    h.ack_all();
+    EXPECT_EQ(h.working(1000 - 12 * 5 * 10), 10) << "deepest rung that fits";
+    EXPECT_EQ(h.working(1000 - 13 * 5 * 10), 0);
+    const auto rebases = h.st.rebase_count();
+    ASSERT_CONSISTENT(h);
+
+    for (price_t px = 1010; px <= 1050; px += 10) {
+        h.quote(px, 25);
+        h.settle();
+        ASSERT_CONSISTENT(h);
+    }
+    EXPECT_EQ(h.st.rebase_count(), rebases) << "walking the quote must not rebuild the grid";
+    EXPECT_EQ(h.working(1050), 25);
+
+    h.st.set_levels(16);
+    EXPECT_EQ(h.st.config().levels, 12u);
+    EXPECT_CONSISTENT(h);
+}

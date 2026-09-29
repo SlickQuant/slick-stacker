@@ -1,10 +1,25 @@
 # Performance
 
-Numbers below were measured on an 8-core x86-64 workstation (32 KiB L1d, 512 KiB
-L2, 16 MiB L3) with MSVC 19.44 at `/O2`, single-threaded, default `Traits`
-(`level_capacity = 256`, `max_orders = 256`). Treat them as shape, not
-specification — re-run on your own hardware before designing a budget around
-them.
+Treat these numbers as shape, not specification — re-run on your own hardware
+before designing a budget around them.
+
+## Environment
+
+| | |
+| --- | --- |
+| Source | the commit that last changed this file (measured on `740d1cc` plus the changes committed with it) |
+| CPU | AMD Ryzen 9 5900HX, 8 cores / 16 threads, 32 KiB L1d, 512 KiB L2 per core, 16 MiB L3 |
+| OS | Windows 11 Pro 10.0.26200 |
+| Compiler | MSVC 19.44.35215, C++20 |
+| Flags | Release: `/MD /O2 /Ob2 /DNDEBUG`, plus `/O2 /W4` from `benchmarks/CMakeLists.txt` |
+| Library | google/benchmark v1.8.3 |
+| `Traits` | default (`level_capacity = 256`, `max_orders = 256`, `max_levels = 64`) |
+| Pinning | one logical CPU (affinity mask `0x10`), `HIGH_PRIORITY_CLASS` |
+
+**The machine was not idle** while these were taken — other processes held it at
+50–80% CPU. The figures are therefore upper bounds, and identical code measured
+within ±15% of itself from one benchmark to the next (±3% in geometric mean).
+Re-run on a quiet machine before quoting an absolute figure.
 
 ## Reproducing
 
@@ -18,34 +33,44 @@ checks that are O(capacity) and will dominate every measurement.
 
 ## Method
 
-Every figure below is a measured median, not an estimate or a projection.
-
-Run-to-run variance *within* one process is small — repeating each benchmark
-eight times gives a coefficient of variation of 1–3%:
+Every figure below is a measured median, not an estimate or a projection. Each
+benchmark was run on its own (`--benchmark_filter`), five repetitions of at least
+0.05 s, and the best median of three rounds is reported:
 
 ```sh
-./bench_quote --benchmark_repetitions=8 --benchmark_report_aggregates_only=true
+start /wait /high /affinity 10 bench_quote.exe --benchmark_filter=^BM_WalkOneTick/4$ ^
+    --benchmark_repetitions=5 --benchmark_min_time=0.05s --benchmark_report_aggregates_only=true
 ```
 
-Variance *between* separate invocations on a loaded machine is much larger, and
-easily swamps a 10% change. Never compare a number from one session against a
-number from another. To attribute a change to a code change, build both variants
-and run them back to back with repetitions, comparing medians — that is how the
-comparison in the last section here was produced.
+Variance *between* separate invocations on a loaded machine easily swamps a 10%
+change, so never compare a number from one session against a number from
+another. To attribute a change to a code change, build both variants and
+alternate them benchmark by benchmark — A, B, A, B — so that load drift lands on
+both equally, then compare best medians.
+
+Every benchmark ends each iteration in `bench_support::keep`, which escapes the
+stacker and a running checksum of every message the executor was asked to send,
+then clobbers memory. The optimiser therefore has to assume the stacker's state
+and the messages are read afterwards, and cannot drop or simplify the measured
+work. `msgs/iter` reports what each iteration actually sent, so a change in
+behaviour shows up next to a change in time.
 
 ## Quoting
 
 `Arg` is the number of rungs behind the quote.
 
-| Benchmark | 1 | 4 | 8 | 16 |
-| --- | --- | --- | --- | --- |
-| `BM_RequoteUnchanged` | 1.9 ns | 1.9 ns | 1.9 ns | 1.9 ns |
-| `BM_RequoteTopSizeOnly` | 72 ns | 88 ns | 112 ns | 170 ns |
-| `BM_WalkOneTick` | 150 ns | 166 ns | 196 ns | 255 ns |
-| `BM_JumpWholeStack` | 341 ns | 589 ns | 952 ns | 1536 ns |
-| `BM_PullAndRebuild` | 225 ns | 531 ns | 928 ns | 1739 ns |
+| Benchmark | 1 | 4 | 8 | 16 | msgs/iter |
+| --- | --- | --- | --- | --- | --- |
+| `BM_RequoteUnchanged` | 5.7 ns | 5.7 ns | 5.8 ns | 5.8 ns | 0 |
+| `BM_RequoteTopSizeOnly` | 194 ns | 216 ns | 285 ns | 385 ns | 1 |
+| `BM_WalkOneTick` | 347 ns | 482 ns | 446 ns | 579 ns | 2 |
+| `BM_JumpWholeStack` | 783 ns | 1348 ns | 2375 ns | 3811 ns | rungs + 1 |
+| `BM_PullAndRebuild` | 573 ns | 1319 ns | 2275 ns | 4879 ns | 2 × (rungs + 1) |
 
-`BM_WalkOneTick` includes draining the acknowledgements, and reports
+`BM_WalkOneTick/4` above `/8` is the noise band described under
+[Environment](#environment), not a property of the code.
+
+`BM_WalkOneTick` includes draining the acknowledgements, and sends
 **2 messages per tick regardless of ladder depth** — the reprice pass carries
 the ladder along rather than rebuilding it, resizing the moved order to what its
 destination wants so no separate order has to be placed behind it.
@@ -57,49 +82,70 @@ most ticks, it is the number worth optimising, and the one worth watching for
 regressions.
 
 `BM_JumpWholeStack` is the worst case — a price move large enough that no level
-survives, so every rung is cancelled and re-established.
+survives, so every rung is repriced to its new price.
 
 ## Slicing
 
 `Arg` is `max_order_qty` against a level target of 40 across 4 rungs, so smaller
 values mean more orders for the same shape.
 
-| `max_order_qty` | time | live orders |
-| --- | --- | --- |
-| 40 | 167 ns | 6 |
-| 10 | 330 ns | 8 |
-| 5 | 633 ns | 16 |
+| `max_order_qty` | time | msgs/iter | live orders |
+| --- | --- | --- | --- |
+| 40 | 385 ns | 2 | 6 |
+| 10 | 783 ns | 4 | 8 |
+| 5 | 1803 ns | 8 | 16 |
 
 Cost tracks order count rather than level count, which is what you would want:
 the per-level work is amortised and the per-order work is what scales.
+
+`BM_WalkDeepQueue` takes that to its limit: 4 rungs of 40 one-lot orders each,
+200 orders live, so every one-tick walk moves 40 orders out of one level. It
+runs at **7.0 µs, 40 messages per tick** — about 176 ns per order moved, sent
+and acknowledged. The reprice pass walks each source queue once per pass rather
+than restarting at its tail after every move, so a queue whose back orders
+cannot move (being cancelled, too large for the surplus, or refused by the
+executor) costs one look at each of them, not one per order moved.
 
 ## Events
 
 | Benchmark | time |
 | --- | --- |
-| `BM_RouteEvent_Hashed` | 2.73 ns |
-| `BM_RouteEvent_UserData` | 2.00 ns |
-| `BM_OnFilled` | 5.7 ns |
-| `BM_EventBatchThenReconcile/1` | 34 ns |
-| `BM_EventBatchThenReconcile/8` | 50 ns |
-| `BM_EventBatchThenReconcile/32` | 107 ns |
+| `BM_RouteEvent_Hashed` | 8.7 ns |
+| `BM_RouteEvent_UserData` | 7.2 ns |
+| `BM_OnFilled` | 47.6 ns |
+| `BM_EventBatchThenReconcile/1` | 188 ns |
+| `BM_EventBatchThenReconcile/8` | 239 ns |
+| `BM_EventBatchThenReconcile/32` | 376 ns |
 
-`BM_RouteEvent_*` isolates identifier routing: look the order up, write two
-fields, set a flag. The user-data variant is the same work with the hash probe
-removed — see the README on `set_order_user_data`. About 25% of the routing
-cost, which is worth taking if your order records have a spare word.
+`BM_RouteEvent_*` isolates identifier routing: look the order up and record a
+new queue position, with the queue-gap gate off so nothing else happens. The
+position changes on every call, so the unchanged-value early return is never
+what is measured. The user-data variant is the same work with the hash probe
+removed — see the README on `set_order_user_data`.
 
-`BM_EventBatchThenReconcile` is the shape the API is built around. Thirty-two
-events plus one reconcile costs 107 ns, against 34 ns for one event plus one
-reconcile: the reconcile dominates, and batching amortises it away. This is why
-the event handlers never send.
+`BM_EventBatchThenReconcile` is the shape the API is built around. The
+queue-gap gate is on and never met, so every event moves the queue position of
+an order the gate is holding back — an update the next reconcile genuinely
+depends on — and the reconcile runs every pass over the band and re-checks the
+gate at each rung, sending nothing. Thirty-two events plus one reconcile cost
+376 ns, against 188 ns for one event plus one reconcile: the reconcile
+dominates, and batching amortises it away. This is why the event handlers never
+send.
+
+Book and queue updates the gate does not need — the gate is off, the value did
+not change, or the level is not being held back — record the value and do not
+mark the stacker dirty, so they never cost a reconcile at all.
 
 ## What resizing on reprice is worth
 
 The reprice pass sizes a moved order to what its destination wants rather than
 capping it at what the order already held, which removes the separate order that
 would otherwise be needed to top the destination up. Both variants built from
-the same source and run back to back, five repetitions each, medians:
+the same source and run back to back, five repetitions each, medians.
+
+These were measured at the initial implementation, with the benchmark harness of
+that time (before the state sink described under [Method](#method)), on a
+different session from the tables above. Read the relative column only.
 
 | Benchmark | capped at order size | resized to destination | |
 | --- | --- | --- | --- |
@@ -126,7 +172,9 @@ nothing when the configuration already forbids large orders.
 ## What costs what
 
 - **Level work** is a contiguous scan of the live band. Bounded by the ladder
-  plus slack plus recent price travel — typically well under thirty entries.
+  plus slack plus recent price travel — typically well under thirty entries, and
+  never more than `level_capacity`, since a ladder that does not fit in the ring
+  is rejected by `validate` and clamped by the stacker.
 - **Order work** is index-linked list traversal within a level. No pointer
   chasing between allocations; the whole slot pool is one array.
 - **Accounting** is `detach`/`attach` around each mutation: at most three level

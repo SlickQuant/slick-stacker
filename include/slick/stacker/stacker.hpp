@@ -182,6 +182,10 @@ public:
     /// Publish the quantity resting in the public book at one of our prices.
     /// Only the queue-gap gate consults it, so this can be skipped entirely
     /// when `queue_gap` is zero. Prices outside the live band are ignored.
+    ///
+    /// The value is always recorded, but the stacker is only marked dirty when
+    /// it could open the gate at a level that is waiting on it. A busy book
+    /// feed therefore never turns into reconciles that have nothing to do.
     void on_book_level(price_t price, qty_t qty) noexcept {
         if (!anchored_) {
             return;
@@ -190,8 +194,13 @@ public:
         if (d == detail::k_invalid_depth) {
             return;
         }
-        if (level_type* l = ring_.peek(d)) {
-            l->market_qty = qty;
+        level_type* l = ring_.peek(d);
+        if (l == nullptr) {
+            return;
+        }
+        const bool changed = l->market_qty != qty;
+        l->market_qty = qty;
+        if (changed && !dirty_ && held_by_queue_gap(*l)) {
             dirty_ = true;
         }
     }
@@ -209,15 +218,33 @@ public:
     /// Publish how much market quantity is ahead of one of our orders. Feeds
     /// the queue-gap gate; without it, a non-zero `queue_gap` will hold the
     /// stacker to one order per level.
+    ///
+    /// Like `on_book_level`, this only marks the stacker dirty when the update
+    /// could open the gate: the order is the last one at a level that is
+    /// waiting on it, which is the only order the gate looks at.
     void on_queue_position(const order_id_t& id, qty_t qty_in_front) noexcept {
         const slot_index_t si = lookup(id);
         if (si == k_null_slot) {
             return;
         }
         slot_type& s = pool_[si];
+        if (cfg_.queue_gap <= 0 || dirty_) {
+            // Nothing to decide: the gate is off, or a reconcile is due anyway.
+            s.qty_in_front = qty_in_front;
+            s.set_flag(slot_type::flag_qp_valid);
+            return;
+        }
+        const bool changed =
+            s.qty_in_front != qty_in_front || !s.has_flag(slot_type::flag_qp_valid);
         s.qty_in_front = qty_in_front;
         s.set_flag(slot_type::flag_qp_valid);
-        dirty_ = true;
+        if (!changed || !s.has_flag(slot_type::flag_linked)) {
+            return;
+        }
+        const level_type* l = ring_.peek(s.linked_depth);
+        if (l != nullptr && l->tail == si && held_by_queue_gap(*l)) {
+            dirty_ = true;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -377,7 +404,7 @@ public:
         const bool grid_changed = anchored_ && cfg.tick_size != cfg_.tick_size;
         const bool type_changed = cfg.order_type != cfg_.order_type;
         cfg_ = cfg;
-        cfg_.levels = std::min<std::uint16_t>(cfg_.levels, Traits::max_levels);
+        cfg_.levels = clamp_levels(cfg_.levels);
         cfg_.qty_profile = {};  // the span is copied below; do not retain it
         set_qty_profile(cfg.qty_profile);
         if (grid_changed) {
@@ -407,7 +434,7 @@ public:
     }
 
     void set_levels(std::uint16_t levels) noexcept {
-        cfg_.levels = std::min<std::uint16_t>(levels, Traits::max_levels);
+        cfg_.levels = clamp_levels(levels);
         if (profile_len_ != 0 && profile_len_ != cfg_.levels) {
             profile_len_ = 0;  // a stale profile no longer describes the ladder
         }
@@ -915,6 +942,14 @@ private:
     // Shape
     // -----------------------------------------------------------------------
 
+    /// Bound `levels` by `Traits::max_levels` and by what the price ring can
+    /// hold at the current gap and slack -- see `max_fitting_levels`. The
+    /// config is not required to have been validated, and a ladder wider than
+    /// the ring would otherwise rebuild the grid on every quote move.
+    [[nodiscard]] std::uint16_t clamp_levels(std::uint16_t levels) const noexcept {
+        return std::min({levels, Traits::max_levels, cfg_.template max_fitting_levels<Traits>()});
+    }
+
     [[nodiscard]] qty_t shape_qty(std::uint16_t index) const noexcept {
         const qty_t q = (profile_len_ == cfg_.levels && profile_len_ != 0) ? profile_[index]
                                                                           : cfg_.stack_qty;
@@ -1127,6 +1162,9 @@ private:
     /// deficit shallow, and a quote that backed away leaves it the other way
     /// round. Whichever cursor cannot make progress advances, so the pass is
     /// linear in the width of the band no matter which case it is in.
+    ///
+    /// The same holds within a source level: `cursor` walks its queue back to
+    /// front once per pass rather than restarting at the tail after every move.
     void reprice_pass() noexcept {
         if (ring_.band_empty()) {
             return;
@@ -1135,10 +1173,21 @@ private:
         const std::int32_t hi = ring_.max_depth();
         std::int32_t to_d = lo;
         std::int32_t from_d = hi;
+        std::int32_t cursor_d = hi + 1;  // the level `cursor` walks; none yet
+        slot_index_t cursor = k_null_slot;
+        // What `to_d` can take, worked out once per destination and again only
+        // after a move changes it -- not on every step of the source cursor.
+        std::int32_t take_d = lo - 1;
+        level_type* to = nullptr;
+        qty_t take = 0;
 
         while (to_d <= hi && from_d >= lo) {
-            level_type* to = ring_.peek(to_d);
-            if (to == nullptr || !wants_more(*to)) {
+            if (take_d != to_d) {
+                take_d = to_d;
+                to = ring_.peek(to_d);
+                take = (to != nullptr && wants_more(*to)) ? reprice_take(*to) : 0;
+            }
+            if (take == 0) {
                 ++to_d;
                 continue;
             }
@@ -1147,60 +1196,69 @@ private:
                 --from_d;
                 continue;
             }
-            if (move_one(*from, *to) == 0) {
+            if (cursor_d != from_d) {
+                cursor_d = from_d;
+                cursor = from->tail;
+            }
+            if (move_one(*from, *to, take, cursor)) {
+                take = wants_more(*to) ? reprice_take(*to) : 0;
+            } else {
                 --from_d;
             }
         }
     }
 
-    /// Reprice a single order from `from` to `to`, resized to whatever `to`
-    /// still wants. Returns the quantity that landed on `to`, or zero if
-    /// nothing could be moved.
-    qty_t move_one(level_type& from, level_type& to) noexcept {
+    /// Size of the order a reprice into `to` would carry, or zero when `to`
+    /// cannot take one at all -- which is the destination cursor's problem, so
+    /// the sources are not given up on because of it.
+    ///
+    /// The order is resized to what the destination wants, growing as readily
+    /// as shrinking. A reprice sends the order to the back of the destination's
+    /// queue whatever its size, so carrying extra quantity across in the same
+    /// message is free -- and it saves the separate new order that topping the
+    /// level up afterwards would need.
+    [[nodiscard]] qty_t reprice_take(const level_type& to) const noexcept {
         if (!crossing_ok(to.price) || to.order_count >= cfg_.max_orders_per_level) {
             return 0;
         }
         const qty_t need = to.delta();
-        const qty_t surplus = -from.delta();
-        if (need <= 0 || surplus <= 0) {
-            return 0;
-        }
         const qty_t room = level_room(to);
-        if (room <= 0) {
+        if (need <= 0 || room <= 0) {
             return 0;
         }
-
-        // The order is resized to what the destination wants, growing as
-        // readily as shrinking. A reprice sends the order to the back of the
-        // destination's queue whatever its size, so carrying extra quantity
-        // across in the same message is free -- and it saves the separate new
-        // order that topping the level up afterwards would need.
         const qty_t take = std::min({need, room, cfg_.max_order_qty});
-        if (take <= 0 || take < cfg_.min_order_qty) {
-            return 0;
-        }
+        return take < cfg_.min_order_qty ? 0 : take;
+    }
 
-        // Take from the back of the queue: those are the orders we would give
-        // up first anyway, so repricing them costs the least queue position.
-        // An order carrying more than `from` can spare is left alone -- moving
-        // it would take the source level below its own target.
-        //
-        // `request_modify` rather than `issue_modify`, so an order the venue
-        // has not acknowledged yet is still worth moving: booking the reprice
-        // now and sending it from the acknowledgement costs one message, where
-        // giving up and starting again costs a cancel and a new order.
-        for (slot_index_t si = from.tail; si != k_null_slot;) {
+    /// Reprice one order of `from` into `to`, resized to `take`, resuming the
+    /// walk of `from`'s queue at `cursor`. Returns false once nothing left in
+    /// `from` can move.
+    ///
+    /// Take from the back of the queue: those are the orders we would give up
+    /// first anyway, so repricing them costs the least queue position. An order
+    /// carrying more than `from` can spare is left alone -- moving it would take
+    /// the source level below its own target.
+    ///
+    /// Whatever the cursor steps past stays unmovable for the rest of the pass:
+    /// the surplus only shrinks as orders leave, an order being cancelled stays
+    /// so, and one the executor just refused would only be refused again.
+    ///
+    /// `request_modify` rather than `issue_modify`, so an order the venue has
+    /// not acknowledged yet is still worth moving: booking the reprice now and
+    /// sending it from the acknowledgement costs one message, where giving up
+    /// and starting again costs a cancel and a new order.
+    bool move_one(level_type& from, level_type& to, qty_t take, slot_index_t& cursor) noexcept {
+        const qty_t surplus = -from.delta();
+        while (cursor != k_null_slot) {
+            const slot_index_t si = cursor;
             slot_type& s = pool_[si];
-            const slot_index_t prev = s.prev;
+            cursor = s.prev;  // read before a move relinks the order
             const qty_t have = s.desired();
-            if (have > 0 && have <= surplus && can_act(s)) {
-                if (request_modify(si, to, take)) {
-                    return take;
-                }
+            if (have > 0 && have <= surplus && can_act(s) && request_modify(si, to, take)) {
+                return true;
             }
-            si = prev;
         }
-        return 0;
+        return false;
     }
 
     void reduce_pass() noexcept {
@@ -1345,6 +1403,15 @@ private:
         }
         const qty_t behind = l.market_qty - std::max<qty_t>(last.qty_in_front, 0);
         return behind >= cfg_.queue_gap;
+    }
+
+    /// True when `l` is waiting on the queue-gap gate, so new queue data there
+    /// may let it grow. Anything else the gate reads is irrelevant to the next
+    /// reconcile and must not mark the stacker dirty.
+    [[nodiscard]] bool held_by_queue_gap(const level_type& l) const noexcept {
+        return cfg_.queue_gap > 0 && l.order_count != 0 &&
+               l.order_count < cfg_.max_orders_per_level && l.depth != top_depth_ &&
+               wants_more(l);
     }
 
     [[nodiscard]] static constexpr qty_t round_down(qty_t v, qty_t increment) noexcept {

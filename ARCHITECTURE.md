@@ -88,6 +88,14 @@ happens — or when a price arrives off the tick grid, meaning the grid itself i
 wrong — the ring reports the collision rather than silently merging two prices.
 The recovery is a cold path: cancel everything, re-anchor, start again.
 
+The one live range the stacker itself chooses is the ladder:
+`(levels + slack_levels) * level_gap_ticks` ticks. If that alone reached the
+capacity, the deepest rungs would alias onto slots already taken and every quote
+move would take the cold path. `stacker_config::validate` rejects such a config
+with `ladder_exceeds_capacity`, and a stacker given one anyway clamps `levels` to
+what fits rather than rebuilding the grid on every tick. The band every pass
+scans is therefore always under `level_capacity` entries.
+
 ### Why not a map, or a linked list
 
 A `std::map` keyed on price gives ordered iteration and O(log n) lookup, at the
@@ -200,7 +208,16 @@ cross. A quote that improved leaves the surplus deep and the deficit shallow; a
 quote that backed away leaves it the other way round. Whichever cursor cannot
 make progress advances, so the pass is linear in the width of the band either
 way, and cannot spin: every successful move consumes an order, and there are
-finitely many.
+finitely many. A destination that cannot take a reprice at all — it would
+cross, or it is at `max_orders_per_level` — advances the destination cursor,
+not the source one, so it does not stop reprices into the levels behind it.
+
+Within a source level, a third cursor walks the queue back to front once per
+pass rather than restarting at the tail after every move. Whatever it steps
+past stays unmovable for the rest of the pass — the surplus only shrinks, an
+order being cancelled stays so, and an order the executor just refused would be
+refused again — so a queue with stuck orders at the back costs one look at each
+of them, not one per order moved from in front of them.
 
 An order carrying more than its level can spare is left alone — moving it would
 take the source level below its own target. The reduce pass trims it in place
@@ -245,6 +262,12 @@ still be holding.
 them all behind the same queue. When `queue_gap` is set, a level will not take
 another order until enough market quantity has arrived behind the last one. The
 top level is never gated — that is the quote itself.
+
+The book and queue-position feeds behind the gate are recorded unconditionally
+but only mark the stacker dirty when they could open it: the gate is on, the
+value changed, and it belongs to a level the gate is holding back — to that
+level's last order, in the case of a queue position. A busy market-data feed
+therefore costs a store per update, not a reconcile.
 
 **Retry.** A refused message leaves work undone with no event coming to wake the
 stacker up again, so the dirty flag is re-armed and the next pass tries once

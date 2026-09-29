@@ -25,6 +25,7 @@ option(SLICK_STACKER_BUILD_EXAMPLES "Build examples" OFF)
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.hpp.in"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/slick/stacker/version.hpp"
+    NEWLINE_STYLE LF
     @ONLY
 )
 
