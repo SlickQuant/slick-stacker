@@ -437,3 +437,137 @@ TEST(StackerShape, LadderWiderThanTheRingIsClampedAndNeverRebases) {
     EXPECT_EQ(h.st.config().levels, 12u);
     EXPECT_CONSISTENT(h);
 }
+
+// Clamping an oversized ladder used to keep the profile at its original length,
+// which no longer matched the clamped `levels`, so the stacker fell back to
+// `stack_qty` -- and with `stack_qty` zero the ladder had no rungs at all. A
+// profile sized for the ladder asked for keeps the rungs that still fit.
+TEST(StackerShape, ClampedLadderKeepsTheLeadingRungsOfItsProfile) {
+    static constexpr std::array<qty_t, 16> profile{1, 2,  3,  4,  5,  6,  7,  8,
+                                                   9, 10, 11, 12, 13, 14, 15, 16};
+    auto cfg = base_cfg();
+    cfg.levels = 16;
+    cfg.level_gap_ticks = 5;  // 80 ticks against a 64-slot ring: 12 rungs fit
+    cfg.stack_qty = 0;
+    cfg.qty_profile = profile;
+    buy_harness h{cfg};
+    ASSERT_EQ(h.st.config().levels, 12u);
+
+    h.quote(1000, 25);
+    h.ack_all();
+    for (int i = 1; i <= 12; ++i) {
+        EXPECT_EQ(h.working(1000 - i * 5 * 10), i) << "rung " << i;
+    }
+    EXPECT_EQ(h.working(1000 - 13 * 5 * 10), 0);
+    ASSERT_CONSISTENT(h);
+
+    // Asking for the same oversized ladder again keeps the profile too.
+    h.st.set_levels(16);
+    h.settle();
+    EXPECT_EQ(h.working(1000 - 12 * 5 * 10), 12);
+    ASSERT_CONSISTENT(h);
+
+    // So does a profile installed on its own for the ladder then asked for.
+    static constexpr std::array<qty_t, 16> sevens{7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7};
+    h.st.set_qty_profile(sevens);
+    h.st.set_levels(16);
+    h.settle();
+    for (int i = 1; i <= 12; ++i) {
+        EXPECT_EQ(h.working(1000 - i * 5 * 10), 7) << "rung " << i;
+    }
+    EXPECT_CONSISTENT(h);
+}
+
+TEST(StackerShape, SanitizedFixesEveryFieldValidateRejects) {
+    using slick::stacker::config_error;
+
+    static constexpr std::array<qty_t, 99> long_profile{};
+    stacker_config cfg;
+    cfg.tick_size = 0;
+    cfg.level_gap_ticks = 0;
+    cfg.levels = 99;
+    cfg.qty_profile = long_profile;
+    cfg.stack_qty = -1;
+    cfg.max_level_qty = -1;
+    cfg.min_order_qty = 10;
+    cfg.max_order_qty = 5;
+    cfg.qty_increment = 0;
+    cfg.qty_hysteresis = -1;
+    cfg.queue_gap = -1;
+    cfg.max_orders_per_level = 0;
+    cfg.max_inflight_modifies = 0;
+
+    const auto s = cfg.sanitized<test_traits>();
+    EXPECT_EQ(s.validate<test_traits>(), config_error::ok);
+    EXPECT_EQ(s.tick_size, 1);
+    EXPECT_EQ(s.level_gap_ticks, 1u);
+    EXPECT_EQ(s.levels, 16u) << "Traits::max_levels";
+    EXPECT_EQ(s.qty_profile.size(), 16u) << "sized for the requested ladder: truncated";
+    EXPECT_EQ(s.stack_qty, 0);
+    EXPECT_EQ(s.max_level_qty, 0);
+    EXPECT_EQ(s.max_order_qty, 10);
+    EXPECT_EQ(s.qty_increment, 1);
+    EXPECT_EQ(s.qty_hysteresis, 0);
+    EXPECT_EQ(s.queue_gap, 0);
+    EXPECT_EQ(s.max_orders_per_level, 1u);
+    EXPECT_EQ(s.max_inflight_modifies, 1u);
+
+    cfg = base_cfg();
+    cfg.tick_size = -25;
+    EXPECT_EQ(cfg.sanitized<test_traits>().tick_size, 1);
+
+    // A profile that does not match the ladder is dropped, not truncated.
+    static constexpr std::array<qty_t, 2> two{1, 2};
+    cfg = base_cfg();
+    cfg.qty_profile = two;
+    EXPECT_TRUE(cfg.sanitized<test_traits>().qty_profile.empty());
+
+    // A valid config comes back unchanged.
+    cfg = base_cfg();
+    const auto same = cfg.sanitized<test_traits>();
+    EXPECT_EQ(same.tick_size, cfg.tick_size);
+    EXPECT_EQ(same.levels, cfg.levels);
+    EXPECT_EQ(same.stack_qty, cfg.stack_qty);
+}
+
+// A zero tick or gap used to reach a modulo by zero on the first quote, or on a
+// later quote move. The stacker now runs on the sanitized config.
+TEST(StackerShape, ZeroTickAndGapAreSanitizedRatherThanDividedBy) {
+    auto cfg = base_cfg();
+    cfg.tick_size = 0;
+    cfg.level_gap_ticks = 0;
+    cfg.qty_increment = 0;
+    cfg.max_orders_per_level = 0;
+    cfg.max_inflight_modifies = 0;
+    buy_harness h{cfg};
+    EXPECT_EQ(h.st.config().tick_size, 1);
+    EXPECT_EQ(h.st.config().level_gap_ticks, 1u);
+    EXPECT_EQ(h.st.config().max_orders_per_level, 1u);
+
+    h.quote(1000, 25);
+    h.ack_all();
+    EXPECT_EQ(h.working(1000), 25);
+    EXPECT_EQ(h.working(999), 10);
+    EXPECT_EQ(h.working(997), 10);
+    EXPECT_EQ(h.working(996), 0);
+    ASSERT_CONSISTENT(h);
+
+    for (price_t px = 1001; px <= 1005; ++px) {
+        h.quote(px, 25);
+        h.settle();
+        ASSERT_CONSISTENT(h);
+    }
+    EXPECT_EQ(h.working(1005), 25);
+    EXPECT_EQ(h.working(1002), 10);
+
+    // The same through configure() on a live stacker.
+    auto bad = base_cfg();
+    bad.tick_size = 0;
+    bad.level_gap_ticks = 0;
+    h.st.configure(bad);
+    h.quote(1010, 25);
+    h.settle();
+    EXPECT_EQ(h.working(1010), 25);
+    EXPECT_EQ(h.working(1009), 10);
+    EXPECT_CONSISTENT(h);
+}

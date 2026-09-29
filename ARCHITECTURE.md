@@ -93,7 +93,11 @@ The one live range the stacker itself chooses is the ladder:
 capacity, the deepest rungs would alias onto slots already taken and every quote
 move would take the cold path. `stacker_config::validate` rejects such a config
 with `ladder_exceeds_capacity`, and a stacker given one anyway clamps `levels` to
-what fits rather than rebuilding the grid on every tick. The band every pass
+what fits rather than rebuilding the grid on every tick — keeping the leading
+rungs of a `qty_profile` sized for the ladder it was asked for. That clamp is
+one part of `stacker_config::sanitized`, which the stacker applies to every
+config it is given so that no field `validate` would reject — a zero tick or
+gap above all — ever reaches its arithmetic. The band every pass
 scans is therefore always under `level_capacity` entries.
 
 ### Why not a map, or a linked list
@@ -264,9 +268,11 @@ another order until enough market quantity has arrived behind the last one. The
 top level is never gated — that is the quote itself.
 
 The book and queue-position feeds behind the gate are recorded unconditionally
-but only mark the stacker dirty when they could open it: the gate is on, the
-value changed, and it belongs to a level the gate is holding back — to that
-level's last order, in the case of a queue position. A busy market-data feed
+but only mark the stacker dirty when they open it: the gate is on, the update
+belongs to a level the gate is holding back — to that level's last order, in
+the case of a queue position — and the gate was shut before the update and is
+open after it. An update that leaves it shut is the common case at a busy
+level, and changes nothing the next reconcile would do. A busy market-data feed
 therefore costs a store per update, not a reconcile.
 
 **Retry.** A refused message leaves work undone with no event coming to wake the

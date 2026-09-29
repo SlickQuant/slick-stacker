@@ -150,10 +150,21 @@ changed costs a few nanoseconds and sends nothing at all.
 | `refill_on_fill` | Whether a fill re-arms the level automatically. |
 
 `cfg.validate<Traits>()` returns a `config_error` describing the first problem,
-or `config_error::ok`. The stacker does not require a validated config; it
-clamps `levels` to `Traits::max_levels` and to what fits in the price ring at
-the configured gap and slack (`cfg.max_fitting_levels<Traits>()`), which
-`validate` reports as `ladder_exceeds_capacity`.
+or `config_error::ok`. Validate your config: a bad one is a bug in the caller.
+The stacker will not be corrupted by one, though — it runs on
+`cfg.sanitized<Traits>()`, which replaces every field `validate` would reject
+with the nearest usable value, and `config()` returns that sanitized copy:
+
+- `tick_size <= 0` and `level_gap_ticks == 0` become 1. A tick of 1 is rarely
+  the venue's grid, which is why validating is still on you.
+- `levels` is clamped to `Traits::max_levels` and to what fits in the price ring
+  at the configured gap and slack (`cfg.max_fitting_levels<Traits>()`), which
+  `validate` reports as `ladder_exceeds_capacity`. A `qty_profile` sized for
+  the requested `levels` keeps its leading entries; a profile of any other size
+  is dropped in favour of `stack_qty`.
+- Negative quantities become 0, `qty_increment <= 0` becomes 1, a
+  `max_order_qty` below `min_order_qty` is raised to it, and a zero
+  `max_orders_per_level` or `max_inflight_modifies` becomes 1.
 
 ### Things worth knowing
 
@@ -199,7 +210,8 @@ true if automatic replenishment is what you want.
 `queue_gap` holds every level to a single order. Leave it at zero if you have no
 queue-position feed. `on_book_level` and `on_queue_position` are cheap to call
 either way: they record the value but only mark the stacker dirty when the gate
-is on and the update could release a level it is holding back.
+is on and the update opens it at a level it is holding back. An update that
+leaves the gate shut costs a store, not a reconcile.
 
 ## Both sides
 

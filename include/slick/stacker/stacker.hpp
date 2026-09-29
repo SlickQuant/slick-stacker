@@ -184,8 +184,8 @@ public:
     /// when `queue_gap` is zero. Prices outside the live band are ignored.
     ///
     /// The value is always recorded, but the stacker is only marked dirty when
-    /// it could open the gate at a level that is waiting on it. A busy book
-    /// feed therefore never turns into reconciles that have nothing to do.
+    /// it opens the gate at a level that is waiting on it. A busy book feed
+    /// therefore never turns into reconciles that have nothing to do.
     void on_book_level(price_t price, qty_t qty) noexcept {
         if (!anchored_) {
             return;
@@ -195,12 +195,20 @@ public:
             return;
         }
         level_type* l = ring_.peek(d);
-        if (l == nullptr) {
+        if (l == nullptr || l->market_qty == qty) {
             return;
         }
-        const bool changed = l->market_qty != qty;
+        const qty_t before = l->market_qty;
         l->market_qty = qty;
-        if (changed && !dirty_ && held_by_queue_gap(*l)) {
+        // Only an update that opens the gate is worth a reconcile. At a busy
+        // level the gate stays shut far more often than not, so its new state
+        // is tested first, and its old state and the rest of what holds the
+        // level back only on the rare update that passes.
+        if (dirty_ || cfg_.queue_gap <= 0 || l->order_count == 0) {
+            return;
+        }
+        const slot_type& last = pool_[l->tail];
+        if (gap_met(last, qty) && !gap_met(last, before) && subject_to_queue_gap(*l)) {
             dirty_ = true;
         }
     }
@@ -220,8 +228,8 @@ public:
     /// stacker to one order per level.
     ///
     /// Like `on_book_level`, this only marks the stacker dirty when the update
-    /// could open the gate: the order is the last one at a level that is
-    /// waiting on it, which is the only order the gate looks at.
+    /// opens the gate: the order is the last one at a level that is waiting on
+    /// it, which is the only order the gate looks at.
     void on_queue_position(const order_id_t& id, qty_t qty_in_front) noexcept {
         const slot_index_t si = lookup(id);
         if (si == k_null_slot) {
@@ -234,15 +242,25 @@ public:
             s.set_flag(slot_type::flag_qp_valid);
             return;
         }
-        const bool changed =
-            s.qty_in_front != qty_in_front || !s.has_flag(slot_type::flag_qp_valid);
+        const qty_t before = s.qty_in_front;
+        const bool had = s.has_flag(slot_type::flag_qp_valid);
+        if (had && before == qty_in_front) {
+            return;
+        }
         s.qty_in_front = qty_in_front;
         s.set_flag(slot_type::flag_qp_valid);
-        if (!changed || !s.has_flag(slot_type::flag_linked)) {
+        // Tested in the same order as `on_book_level`: the gate only looks at
+        // a level's last order, and only once it is live; then whether it is
+        // open now, whether it was shut before, and whether the level is
+        // waiting on it at all.
+        if (s.state != order_state_t::live || !s.has_flag(slot_type::flag_linked)) {
             return;
         }
         const level_type* l = ring_.peek(s.linked_depth);
-        if (l != nullptr && l->tail == si && held_by_queue_gap(*l)) {
+        if (l == nullptr || l->tail != si || !gap_behind(l->market_qty, qty_in_front)) {
+            return;
+        }
+        if (!(had && gap_behind(l->market_qty, before)) && subject_to_queue_gap(*l)) {
             dirty_ = true;
         }
     }
@@ -400,13 +418,16 @@ public:
     /// Replace the whole configuration. `tick_size` changes force the price
     /// grid to be rebuilt, which cancels everything currently working, and
     /// `order_type` changes cancel and replace it.
+    ///
+    /// The stacker runs on `cfg.sanitized<Traits>()`, so an unvalidated config
+    /// cannot corrupt it; `config()` returns what it is actually running on.
     void configure(const stacker_config& cfg) noexcept {
-        const bool grid_changed = anchored_ && cfg.tick_size != cfg_.tick_size;
-        const bool type_changed = cfg.order_type != cfg_.order_type;
-        cfg_ = cfg;
-        cfg_.levels = clamp_levels(cfg_.levels);
+        const stacker_config next = cfg.template sanitized<Traits>();
+        const bool grid_changed = anchored_ && next.tick_size != cfg_.tick_size;
+        const bool type_changed = next.order_type != cfg_.order_type;
+        cfg_ = next;
         cfg_.qty_profile = {};  // the span is copied below; do not retain it
-        set_qty_profile(cfg.qty_profile);
+        set_qty_profile(next.qty_profile);
         if (grid_changed) {
             rebase(quote_price_);
         }
@@ -434,8 +455,11 @@ public:
     }
 
     void set_levels(std::uint16_t levels) noexcept {
-        cfg_.levels = clamp_levels(levels);
-        if (profile_len_ != 0 && profile_len_ != cfg_.levels) {
+        cfg_.levels = cfg_.template clamp_levels<Traits>(levels);
+        if (profile_len_ == levels) {
+            // Sized for the ladder asked for: keep the rungs that still fit.
+            profile_len_ = cfg_.levels;
+        } else if (profile_len_ != cfg_.levels) {
             profile_len_ = 0;  // a stale profile no longer describes the ladder
         }
         shape_dirty_ = true;
@@ -942,14 +966,6 @@ private:
     // Shape
     // -----------------------------------------------------------------------
 
-    /// Bound `levels` by `Traits::max_levels` and by what the price ring can
-    /// hold at the current gap and slack -- see `max_fitting_levels`. The
-    /// config is not required to have been validated, and a ladder wider than
-    /// the ring would otherwise rebuild the grid on every quote move.
-    [[nodiscard]] std::uint16_t clamp_levels(std::uint16_t levels) const noexcept {
-        return std::min({levels, Traits::max_levels, cfg_.template max_fitting_levels<Traits>()});
-    }
-
     [[nodiscard]] qty_t shape_qty(std::uint16_t index) const noexcept {
         const qty_t q = (profile_len_ == cfg_.levels && profile_len_ != 0) ? profile_[index]
                                                                           : cfg_.stack_qty;
@@ -1397,18 +1413,31 @@ private:
         if (cfg_.queue_gap <= 0 || l.order_count == 0 || l.depth == top_depth_) {
             return true;
         }
-        const slot_type& last = pool_[l.tail];
-        if (last.state != order_state_t::live || !last.has_flag(slot_type::flag_qp_valid)) {
-            return false;
-        }
-        const qty_t behind = l.market_qty - std::max<qty_t>(last.qty_in_front, 0);
-        return behind >= cfg_.queue_gap;
+        return gap_met(pool_[l.tail], l.market_qty);
     }
 
-    /// True when `l` is waiting on the queue-gap gate, so new queue data there
-    /// may let it grow. Anything else the gate reads is irrelevant to the next
-    /// reconcile and must not mark the stacker dirty.
-    [[nodiscard]] bool held_by_queue_gap(const level_type& l) const noexcept {
+    /// True when `market_qty` in the book leaves at least `queue_gap` behind
+    /// an order with `in_front` ahead of it.
+    [[nodiscard]] bool gap_behind(qty_t market_qty, qty_t in_front) const noexcept {
+        return market_qty - std::max<qty_t>(in_front, 0) >= cfg_.queue_gap;
+    }
+
+    /// True when the gate lets another order in behind `last`, a level's last
+    /// order, with `market_qty` in the book at that price.
+    [[nodiscard]] bool gap_met(const slot_type& last, qty_t market_qty) const noexcept {
+        return last.state == order_state_t::live && last.has_flag(slot_type::flag_qp_valid) &&
+               gap_behind(market_qty, last.qty_in_front);
+    }
+
+    /// True when `l` wants to grow and the queue-gap gate decides whether it
+    /// may, whatever state the gate is in.
+    ///
+    /// The feeds mark the stacker dirty only when an update takes the gate
+    /// from shut to open at such a level. One that leaves it shut -- the
+    /// common case at a busy level -- changes nothing the next reconcile
+    /// would do, and nor does one at a level whose gate was already open,
+    /// since whatever is holding that level back is not the queue.
+    [[nodiscard]] bool subject_to_queue_gap(const level_type& l) const noexcept {
         return cfg_.queue_gap > 0 && l.order_count != 0 &&
                l.order_count < cfg_.max_orders_per_level && l.depth != top_depth_ &&
                wants_more(l);

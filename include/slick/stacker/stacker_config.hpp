@@ -206,6 +206,65 @@ struct stacker_config {
         return rungs > slack_levels ? static_cast<std::uint16_t>(rungs - slack_levels) : 0;
     }
 
+    /// `n` bounded by `Traits::max_levels` and by `max_fitting_levels`.
+    template <class Traits = default_traits>
+    [[nodiscard]] constexpr std::uint16_t clamp_levels(std::uint16_t n) const noexcept {
+        const std::uint16_t fit = max_fitting_levels<Traits>();
+        const std::uint16_t cap = fit < Traits::max_levels ? fit : Traits::max_levels;
+        return n < cap ? n : cap;
+    }
+
+    /// A copy with every field `validate` would reject replaced by the nearest
+    /// usable value, so nothing the stacker computes from it can divide by zero
+    /// or run off the end of the ring. This is what the stacker runs on; it is
+    /// a guard against a bad config doing harm, not a substitute for checking
+    /// it -- a zero `tick_size` becomes 1, which is rarely the venue's grid.
+    ///
+    ///   - `tick_size <= 0` becomes 1, `level_gap_ticks == 0` becomes 1.
+    ///   - `levels` is clamped by `clamp_levels`.
+    ///   - A `qty_profile` sized for the requested `levels` keeps its leading
+    ///     `levels` entries after the clamp; one of any other size is dropped,
+    ///     leaving `stack_qty` in charge.
+    ///   - Negative quantities become 0, `qty_increment <= 0` becomes 1, and a
+    ///     `max_order_qty` below `min_order_qty` is raised to it.
+    ///   - `max_orders_per_level` and `max_inflight_modifies` of 0 become 1.
+    ///
+    /// Negative entries inside `qty_profile` cannot be fixed in a borrowed
+    /// span; the stacker clamps them to 0 as it copies the profile.
+    template <class Traits = default_traits>
+    [[nodiscard]] constexpr stacker_config sanitized() const noexcept {
+        auto non_negative = [](qty_t q) { return q < 0 ? qty_t{0} : q; };
+        stacker_config c = *this;
+        if (c.tick_size <= 0) {
+            c.tick_size = 1;
+        }
+        if (c.level_gap_ticks == 0) {
+            c.level_gap_ticks = 1;
+        }
+        c.levels = c.clamp_levels<Traits>(levels);
+        c.qty_profile =
+            qty_profile.size() == levels ? qty_profile.first(c.levels) : std::span<const qty_t>{};
+        c.stack_qty = non_negative(c.stack_qty);
+        c.max_level_qty = non_negative(c.max_level_qty);
+        c.min_order_qty = non_negative(c.min_order_qty);
+        c.max_order_qty = non_negative(c.max_order_qty);
+        c.qty_hysteresis = non_negative(c.qty_hysteresis);
+        c.queue_gap = non_negative(c.queue_gap);
+        if (c.qty_increment <= 0) {
+            c.qty_increment = 1;
+        }
+        if (c.max_order_qty < c.min_order_qty) {
+            c.max_order_qty = c.min_order_qty;
+        }
+        if (c.max_orders_per_level == 0) {
+            c.max_orders_per_level = 1;
+        }
+        if (c.max_inflight_modifies == 0) {
+            c.max_inflight_modifies = 1;
+        }
+        return c;
+    }
+
     /// Validate against the sizing limits of `Traits`.
     template <class Traits = default_traits>
     [[nodiscard]] constexpr config_error validate() const noexcept {

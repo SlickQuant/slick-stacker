@@ -110,12 +110,20 @@ executor) costs one look at each of them, not one per order moved.
 
 | Benchmark | time |
 | --- | --- |
-| `BM_RouteEvent_Hashed` | 8.7 ns |
-| `BM_RouteEvent_UserData` | 7.2 ns |
-| `BM_OnFilled` | 47.6 ns |
-| `BM_EventBatchThenReconcile/1` | 188 ns |
-| `BM_EventBatchThenReconcile/8` | 239 ns |
-| `BM_EventBatchThenReconcile/32` | 376 ns |
+| `BM_RouteEvent_Hashed` | 9.1 ns |
+| `BM_RouteEvent_UserData` | 6.8 ns |
+| `BM_QueueFeed_GateShut` | 17.8 ns |
+| `BM_BookFeed_GateShut` | 23.0 ns |
+| `BM_OnFilled` | 44.1 ns |
+| `BM_EventBatchThenReconcile/1` | 124 ns |
+| `BM_EventBatchThenReconcile/8` | 421 ns |
+| `BM_EventBatchThenReconcile/32` | 1.44 µs |
+
+This table was measured after the rest of the file, in one session of its own:
+each benchmark alternated against the previous build, pinned, best median of
+four rounds of five repetitions, from google-benchmark's `real_time`. (On
+Windows `cpu_time` comes from a clock that ticks every 15.6 ms, which quantizes
+short runs to tens of percent; do not compare on it.)
 
 `BM_RouteEvent_*` isolates identifier routing: look the order up and record a
 new queue position, with the queue-gap gate off so nothing else happens. The
@@ -123,18 +131,34 @@ position changes on every call, so the unchanged-value early return is never
 what is measured. The user-data variant is the same work with the hash probe
 removed — see the README on `set_order_user_data`.
 
-`BM_EventBatchThenReconcile` is the shape the API is built around. The
-queue-gap gate is on and never met, so every event moves the queue position of
-an order the gate is holding back — an update the next reconcile genuinely
-depends on — and the reconcile runs every pass over the band and re-checks the
-gate at each rung, sending nothing. Thirty-two events plus one reconcile cost
-376 ns, against 188 ns for one event plus one reconcile: the reconcile
-dominates, and batching amortises it away. This is why the event handlers never
-send.
+`BM_QueueFeed_GateShut` and `BM_BookFeed_GateShut` feed the queue-gap gate at
+the levels it is holding back, with the gate staying shut — the common case at
+a busy level. Each call has to decide that the update does not open the gate,
+and mark nothing dirty. Both handlers test the gate's new state first, since
+that is what fails, and reach its old state and the level's other conditions
+only on the rare update that passes; that took the queue feed from 32 to 18 ns.
+The book feed gained nothing measurable from the same reordering. It starts by
+turning the price into a ring depth, a 64-bit division by `tick_size`, which
+is the likelier cost there.
 
-Book and queue updates the gate does not need — the gate is off, the value did
-not change, or the level is not being held back — record the value and do not
-mark the stacker dirty, so they never cost a reconcile at all.
+`BM_OnFilled` fills each order a unit at a time at the price it rests at, as a
+venue would, so every fill's target update lands on that order's own level.
+The orders are sized so that none completes during a run.
+
+`BM_EventBatchThenReconcile` is the shape the API is built around. Every event
+is a fill, spread across all nine levels — an update the next reconcile
+genuinely depends on — and the reconcile runs every pass over the band to
+re-decide each level. With `refill_on_fill` off a fill takes the target down
+with the resting quantity, so the reconcile sends nothing and the state is the
+same at the start of every iteration. One fill plus one reconcile costs 124 ns,
+of which the reconcile is roughly 80; thirty-two fills plus one reconcile cost
+1.44 µs, about 45 ns per event — the reconcile has been amortised down to a few
+nanoseconds each. This is why the event handlers never send.
+
+Book and queue updates that cannot change the next reconcile — the gate is off,
+the value did not change, the level is not being held back, or the gate stays
+shut after the update — record the value and do not mark the stacker dirty, so
+they never cost a reconcile at all. Only an update that opens the gate does.
 
 ## What resizing on reprice is worth
 

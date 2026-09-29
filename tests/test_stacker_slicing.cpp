@@ -221,9 +221,10 @@ TEST(StackerSlicing, QueueFeedWithTheGateOffDoesNotDirty) {
     EXPECT_CONSISTENT(h);
 }
 
-// With the gate on, only an update that could open it is worth a reconcile: a
-// change at a level that is being held back, to the order the gate looks at.
-TEST(StackerSlicing, QueueFeedDirtiesOnlyALevelHeldByTheGate) {
+// With the gate on, only an update that opens it is worth a reconcile: a change
+// at a level that is being held back, to the order the gate looks at, that
+// takes the queue behind us from short of `queue_gap` to at least it.
+TEST(StackerSlicing, QueueFeedDirtiesOnlyWhenItOpensTheGate) {
     auto cfg = base_cfg();
     cfg.levels = 2;
     cfg.stack_qty = 30;
@@ -246,18 +247,30 @@ TEST(StackerSlicing, QueueFeedDirtiesOnlyALevelHeldByTheGate) {
     h.st.on_book_level(950, 500);
     EXPECT_FALSE(h.st.dirty());
 
-    // Level 990 wants 30 and holds 10, so it is waiting on the gate.
+    // Level 990 wants 30 and holds 10, so it is waiting on the gate -- but
+    // none of these open it: first there is no queue position at all, then
+    // only 20 is behind us, short of 50.
     h.st.on_book_level(990, 120);
-    EXPECT_TRUE(h.st.dirty());
-    h.settle();
+    EXPECT_FALSE(h.st.dirty()) << "no queue position yet: the gate stays shut";
     h.st.on_queue_position(held_id, 100);
-    EXPECT_TRUE(h.st.dirty());
+    EXPECT_FALSE(h.st.dirty()) << "only 20 behind us, short of 50";
+    // A busy feed moving either number while the gate stays shut: 100 ahead
+    // needs a book of 150, and a book of 120 needs no more than 70 ahead.
+    for (qty_t book = 121; book < 150; ++book) {
+        h.st.on_book_level(990, book);
+        ASSERT_FALSE(h.st.dirty()) << "book " << book << " keeps the gate shut";
+    }
+    h.st.on_book_level(990, 120);
+    for (qty_t ahead = 99; ahead > 70; --ahead) {
+        h.st.on_queue_position(held_id, ahead);
+        ASSERT_FALSE(h.st.dirty()) << ahead << " ahead keeps the gate shut";
+    }
     h.settle();
-    EXPECT_EQ(h.orders_at(990), 1u) << "only 20 behind us, short of 50";
+    EXPECT_EQ(h.orders_at(990), 1u);
 
     // Re-publishing the same numbers changes nothing.
     h.st.on_book_level(990, 120);
-    h.st.on_queue_position(held_id, 100);
+    h.st.on_queue_position(held_id, 71);
     EXPECT_FALSE(h.st.dirty());
 
     // Enough queue behind us now.
@@ -265,6 +278,38 @@ TEST(StackerSlicing, QueueFeedDirtiesOnlyALevelHeldByTheGate) {
     EXPECT_TRUE(h.st.dirty());
     h.settle();
     EXPECT_EQ(h.orders_at(990), 2u);
+    EXPECT_CONSISTENT(h);
+}
+
+// The queue-position feed opens the gate just as the book feed does -- and once
+// it is open, further updates that keep it open are not news.
+TEST(StackerSlicing, QueuePositionThatOpensTheGateDirties) {
+    auto cfg = base_cfg();
+    cfg.levels = 1;
+    cfg.stack_qty = 30;
+    cfg.max_order_qty = 10;
+    cfg.max_orders_per_level = 2;
+    cfg.queue_gap = 50;
+    buy_harness h{cfg};
+
+    h.quote(1000, 10);
+    h.settle();
+    const auto held_id = h.exec.log[1].id;
+    ASSERT_EQ(h.exec.orders[held_id].price, 990);
+
+    h.st.on_book_level(990, 200);
+    h.st.on_queue_position(held_id, 160);
+    EXPECT_FALSE(h.st.dirty()) << "40 behind us, short of 50";
+    h.st.on_queue_position(held_id, 150);
+    EXPECT_TRUE(h.st.dirty()) << "50 behind us opens the gate";
+    h.settle();
+    ASSERT_EQ(h.orders_at(990), 2u);
+
+    // 990 now holds its maximum of two orders, so it is not waiting on the
+    // gate any more whatever the queue does.
+    h.st.on_queue_position(h.last_placed(), 0);
+    h.st.on_book_level(990, 900);
+    EXPECT_FALSE(h.st.dirty());
     EXPECT_CONSISTENT(h);
 }
 
