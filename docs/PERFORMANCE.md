@@ -7,7 +7,7 @@ before designing a budget around them.
 
 | | |
 | --- | --- |
-| Source | the commit that last changed this file (measured on `740d1cc` plus the changes committed with it) |
+| Source | per section — see [Provenance](#provenance) |
 | CPU | AMD Ryzen 9 5900HX, 8 cores / 16 threads, 32 KiB L1d, 512 KiB L2 per core, 16 MiB L3 |
 | OS | Windows 11 Pro 10.0.26200 |
 | Compiler | MSVC 19.44.35215, C++20 |
@@ -21,9 +21,22 @@ before designing a budget around them.
 within ±15% of itself from one benchmark to the next (±3% in geometric mean).
 Re-run on a quiet machine before quoting an absolute figure.
 
+## Provenance
+
+Each section was measured on the source tree of one commit, unmodified except
+where noted. Later commits have not been re-measured, so check out the listed
+commit before comparing a figure against your own run.
+
+| Section | Measured on |
+| --- | --- |
+| [Quoting](#quoting), [Slicing](#slicing) | `78d2b7d` |
+| [Events](#events) | `ab3fdeb` |
+| [What resizing on reprice is worth](#what-resizing-on-reprice-is-worth) | `9643a24` (initial implementation); the "capped" variant is that tree with the reprice resizing taken out |
+
 ## Reproducing
 
 ```sh
+git checkout <commit from the table above>
 cmake -B build -DSLICK_STACKER_BUILD_BENCHMARKS=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release --target run_benchmarks
 ```
@@ -119,8 +132,8 @@ executor) costs one look at each of them, not one per order moved.
 | `BM_EventBatchThenReconcile/8` | 421 ns |
 | `BM_EventBatchThenReconcile/32` | 1.44 µs |
 
-This table was measured after the rest of the file, in one session of its own:
-each benchmark alternated against the previous build, pinned, best median of
+This table was measured on `ab3fdeb`, after the rest of the file and in one
+session of its own: each benchmark alternated against the previous build, pinned, best median of
 four rounds of five repetitions, from google-benchmark's `real_time`. (On
 Windows `cpu_time` comes from a clock that ticks every 15.6 ms, which quantizes
 short runs to tens of percent; do not compare on it.)
@@ -171,8 +184,8 @@ capping it at what the order already held, which removes the separate order that
 would otherwise be needed to top the destination up. Both variants built from
 the same source and run back to back, five repetitions each, medians.
 
-These were measured at the initial implementation, with the benchmark harness of
-that time (before the state sink described under [Method](#method)), on a
+These were measured at the initial implementation (`9643a24`), with the
+benchmark harness of that time (before the state sink described under [Method](#method)), on a
 different session from the tables above. Read the relative column only.
 
 | Benchmark | capped at order size | resized to destination | |
