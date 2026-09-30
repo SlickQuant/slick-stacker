@@ -70,14 +70,19 @@ public:
 
     [[nodiscard]] bool dirty() const noexcept { return buy_.dirty() || sell_.dirty(); }
 
+    /// Each side's limit is taken from the other side's state immediately
+    /// before it reconciles, so the bid (which goes first) wins a contested
+    /// price and the offer is kept clear of whatever the bid just sent.
     void reconcile() noexcept {
-        apply_cross_guard();
+        guard_buy();
         buy_.reconcile();
+        guard_sell();
         sell_.reconcile();
         // Withdrawing from a contested price frees it for the other side, but
-        // only once the venue confirms. Re-arm the guard so the next pass picks
-        // the ground up.
-        apply_cross_guard();
+        // only once the venue confirms. Re-arm the bid's guard against the
+        // offer as it now stands so the next pass picks the ground up; the
+        // offer's is already current, since the bid has not moved since.
+        guard_buy();
     }
 
     // -----------------------------------------------------------------------
@@ -137,10 +142,13 @@ private:
         }
     }
 
-    /// Give each side a placement limit that is the tighter of the market's
+    /// Give a side a placement limit that is the tighter of the market's
     /// opposite top and the nearest price the other side may still hold.
-    void apply_cross_guard() noexcept {
+    void guard_buy() noexcept {
         buy_.on_opposite_top(tighter<side_t::buy>(market_ask_, sell_.nearest_live_price()));
+    }
+
+    void guard_sell() noexcept {
         sell_.on_opposite_top(tighter<side_t::sell>(market_bid_, buy_.nearest_live_price()));
     }
 

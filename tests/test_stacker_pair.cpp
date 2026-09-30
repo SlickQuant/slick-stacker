@@ -74,6 +74,30 @@ struct pair_harness {
     std::size_t cursor = 0;
 };
 
+/// True when the venue could be holding one of our bids at or above one of our
+/// offers. An order with a modify in flight counts at both its old and its new
+/// price, since either may be the one resting when the other side arrives.
+bool venue_crossed(const mock_executor& exec) {
+    price_t best_bid = k_null_price;
+    price_t best_ask = k_null_price;
+    auto note = [&](side_t s, price_t px) {
+        price_t& best = s == side_t::buy ? best_bid : best_ask;
+        if (best == k_null_price || (s == side_t::buy ? px > best : px < best)) {
+            best = px;
+        }
+    };
+    for (const auto& [id, o] : exec.orders) {
+        if (!o.live) {
+            continue;
+        }
+        note(o.side, o.price);
+        if (exec.has_pending_modify(id)) {
+            note(o.side, exec.pending_modify(id).first);
+        }
+    }
+    return best_bid != k_null_price && best_ask != k_null_price && best_bid >= best_ask;
+}
+
 }  // namespace
 
 TEST(StackerPair, BothSidesQuoteIndependently) {
@@ -162,6 +186,44 @@ TEST(StackerPair, LaddersMayNotOverlap) {
     for (price_t px = 1010; px <= 1040; px += 10) {
         EXPECT_EQ(h.pair.buy().working_at(px), 0) << "bid found at " << px;
     }
+    EXPECT_TRUE(h.pair.validate());
+}
+
+// With no market top there is nothing but our own orders to stop a crossed
+// quote. The bid reconciles first, so the offer's limit has to reflect what the
+// bid just sent, not what it held before this pass.
+TEST(StackerPair, CrossedInitialQuoteOnDormantBookDoesNotSelfCross) {
+    pair_harness h{base_cfg()};
+    h.pair.quote(1010, 25, 1000, 25);
+    h.pair.reconcile();
+    EXPECT_FALSE(venue_crossed(h.exec)) << "a single pass sent both sides into each other";
+
+    h.ack_all();
+    h.settle();
+    EXPECT_FALSE(venue_crossed(h.exec));
+    EXPECT_EQ(h.pair.buy().working_at(1010), 25);
+    EXPECT_EQ(h.pair.sell().working_at(1000), 0);
+    EXPECT_EQ(h.pair.sell().working_at(1010), 0);
+    EXPECT_TRUE(h.pair.validate());
+}
+
+TEST(StackerPair, OverlappingLaddersOnDormantBookDoNotSelfCross) {
+    auto cfg = base_cfg();
+    cfg.levels = 3;
+    pair_harness h{cfg};
+
+    // Bid ladder wants 1000..970, offer ladder 980..1010: three prices shared.
+    h.pair.quote(1000, 25, 980, 25);
+    h.pair.reconcile();
+    EXPECT_FALSE(venue_crossed(h.exec));
+
+    h.ack_all();
+    h.settle();
+    EXPECT_FALSE(venue_crossed(h.exec));
+    for (price_t px = 980; px <= 1000; px += 10) {
+        EXPECT_EQ(h.pair.sell().working_at(px), 0) << "offer found at " << px;
+    }
+    EXPECT_EQ(h.pair.buy().working_at(1000), 25);
     EXPECT_TRUE(h.pair.validate());
 }
 

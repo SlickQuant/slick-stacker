@@ -238,9 +238,13 @@ book.on_filled(side_t::buy, id, qty, price);   // side is explicit: no guessing
 
 Each side is given a placement limit that is the tighter of the market's
 opposite top and the nearest price the other side may still be holding, so the
-bid ladder can never walk into a live offer of our own. Because the resting
-order has to actually be withdrawn first, resolving a crossed quote takes a
-round trip; `dirty()` stays true until it has settled.
+bid ladder can never walk into a live offer of our own. The limit is refreshed
+between the two sides within a single `reconcile()`, so a quote that crosses
+itself — even on a book with no market top — never sends both sides: the bid
+reconciles first and takes the contested prices, and the offer is held above
+it. Because a resting order has to actually be withdrawn before the other side
+may use its price, resolving a crossed quote takes a round trip; `dirty()`
+stays true until it has settled.
 
 ## Threading
 
