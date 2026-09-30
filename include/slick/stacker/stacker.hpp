@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <span>
 #include <type_traits>
+#include <utility>
 
 SLICK_STACKER_NAMESPACE_BEGIN
 
@@ -585,17 +586,21 @@ private:
             return;
         }
         const auto c = detail::contribution_of(s);
-        if (c.acked_delta != 0) {
+        // Resolve each distinct price once: every level_for() is a runtime idiv
+        // plus a non-inlined try_at() the compiler cannot merge. contribution_of
+        // always takes out_* from the acked side (out_delta == -acked_delta), and
+        // a same-level resize puts in_price there too, so one lookup usually
+        // serves all three. Adding a zero delta is cheaper than branching on it.
+        SLICK_STACKER_ASSERT(c.out_delta == 0 ||
+                             (c.out_price == c.acked_price && c.out_delta == -c.acked_delta));
+        const bool in_at_acked = c.in_delta != 0 && c.in_price == c.acked_price;
+        if (c.acked_delta != 0 || in_at_acked) {
             if (level_type* l = level_for(c.acked_price)) {
                 l->acked += sign * c.acked_delta;
+                l->inflight += sign * (c.out_delta + (in_at_acked ? c.in_delta : 0));
             }
         }
-        if (c.out_delta != 0) {
-            if (level_type* l = level_for(c.out_price)) {
-                l->inflight += sign * c.out_delta;
-            }
-        }
-        if (c.in_delta != 0) {
+        if (c.in_delta != 0 && !in_at_acked) {
             if (level_type* l = level_for(c.in_price)) {
                 l->inflight += sign * c.in_delta;
             }
@@ -623,9 +628,17 @@ private:
         }
         return ring_.peek(d);
     }
+    [[nodiscard]] level_type* level_or_null(price_t price) noexcept {
+        return const_cast<level_type*>(std::as_const(*this).level_or_null(price));
+    }
 
+    // A target can only be consumed where one was set, so this peeks rather
+    // than binds: a fill reported at a price with no level (an orphan's old
+    // grid, a venue price off our band) must not claim a ring slot. That would
+    // widen the band that the next apply_shape() tests for overflow -- before
+    // shrink_band() gets a chance to drop it -- and could force a rebase.
     void consume_target(price_t price, qty_t qty) noexcept {
-        if (level_type* l = level_for(price)) {
+        if (level_type* l = level_or_null(price)) {
             l->target = l->target > qty ? l->target - qty : 0;
             target_consumed_ = true;
         }

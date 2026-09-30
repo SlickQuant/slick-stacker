@@ -53,6 +53,9 @@ onto its levels' counters. Deriving a delta by hand at each of the two dozen
 call sites is exactly where this kind of code rots, so instead the contribution
 is recomputed from one definition and applied twice with opposite signs. It
 costs a handful of adds on paths that are already touching those cache lines.
+The price-to-level lookup (a division by the tick size) is the only expensive
+part, so each application resolves every distinct price once: the outgoing
+quantity always leaves the acked level, and a same-level resize lands there too.
 
 `stacker::validate()` rebuilds every level through the same function and
 compares against the incrementally maintained values. The test suite calls it

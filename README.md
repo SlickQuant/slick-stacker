@@ -209,7 +209,9 @@ against an order rather than subsequent ones.
 **`refill_on_fill`** — false by default. A fill reduces both the level's working
 quantity and its target, so the stack settles at what is left and waits. The
 alternative is a stacker that quietly re-arms size nobody re-authorised. Set it
-true if automatic replenishment is what you want.
+true if automatic replenishment is what you want. The target consumed is the one
+at the fill's reported price (the order's acked price if you pass `k_null_price`);
+a fill at a price where the stack has no level consumes nothing.
 
 **`queue_gap`** — needs `on_queue_position` to be fed. Without it a non-zero
 `queue_gap` holds every level to a single order. Leave it at zero if you have no

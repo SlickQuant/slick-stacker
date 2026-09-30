@@ -100,6 +100,35 @@ TEST(StackerTracking, RefillOnFillReplenishesTheLevel) {
     EXPECT_CONSISTENT(h);
 }
 
+// A venue can report a fill price with no level behind it. There is no target
+// to consume there, and claiming a ring slot for it would stretch the live band
+// far enough that the next shape rebuild sees a phantom overflow and flattens
+// the whole stack.
+TEST(StackerTracking, FillPricedOffTheBandConsumesNothing) {
+    buy_harness h{base_cfg()};
+    h.quote(5000, 25);
+    h.ack_all();
+    const auto rebases = h.st.rebase_count();
+    const auto id = placed_at(h.exec, 5000);
+
+    // 100 ticks below the top: on the grid, but wider than the 64-slot ring.
+    h.exec.orders[id].filled += 10;
+    h.st.on_filled(id, 10, 4000);
+    EXPECT_CONSISTENT(h);
+    EXPECT_EQ(h.target(4000), 0);
+    EXPECT_EQ(h.target(5000), 25) << "the fill was not at this level";
+
+    const auto mark = h.exec.mark();
+    h.st.quote(5000, 25);
+    h.settle();
+
+    EXPECT_EQ(h.st.rebase_count(), rebases) << "a phantom level must not force a rebase";
+    EXPECT_EQ(h.exec.count(mock_executor::kind::cancel, mark), 0u);
+    EXPECT_EQ(h.working(5000), 25);
+    EXPECT_EQ(h.working(4990), 10);
+    EXPECT_CONSISTENT(h);
+}
+
 TEST(StackerTracking, FullFillRetiresTheOrder) {
     buy_harness h{base_cfg()};
     h.quote(1000, 25);
