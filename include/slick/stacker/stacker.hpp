@@ -1011,26 +1011,6 @@ private:
         return cfg_.max_level_qty == k_no_qty_limit ? q : std::min(q, cfg_.max_level_qty);
     }
 
-    /// Target the shape asks for at `depth`, ignoring slack retention.
-    [[nodiscard]] qty_t shape_target_at(std::int32_t depth) const noexcept {
-        if (depth < top_depth_) {
-            return 0;  // never leave anything in front of the quote
-        }
-        const std::int32_t off = depth - top_depth_;
-        if (off == 0) {
-            return std::min(quote_qty_, cfg_.max_level_qty);
-        }
-        const auto gap = static_cast<std::int32_t>(cfg_.level_gap_ticks);
-        if (off % gap != 0) {
-            return 0;
-        }
-        const std::int32_t index = off / gap;
-        if (index > static_cast<std::int32_t>(cfg_.levels)) {
-            return 0;
-        }
-        return shape_qty(static_cast<std::uint16_t>(index - 1));
-    }
-
     /// Most a retained slack level may carry: the size of the ladder's own
     /// deepest rung.
     ///
@@ -1045,24 +1025,6 @@ private:
                                : cfg_.stack_qty;
     }
 
-    /// True when `depth` sits in the slack region: past the bottom of the
-    /// ladder but close enough that a level already working there is kept
-    /// rather than cancelled, so a one-tick flicker does not churn the tail.
-    [[nodiscard]] bool in_slack(std::int32_t depth) const noexcept {
-        if (cfg_.slack_levels == 0 || depth <= top_depth_) {
-            return false;
-        }
-        const auto gap = static_cast<std::int32_t>(cfg_.level_gap_ticks);
-        const std::int32_t off = depth - top_depth_;
-        if (off % gap != 0) {
-            return false;
-        }
-        const std::int32_t index = off / gap;
-        return index > static_cast<std::int32_t>(cfg_.levels) &&
-               index <= static_cast<std::int32_t>(cfg_.levels) +
-                            static_cast<std::int32_t>(cfg_.slack_levels);
-    }
-
     void apply_shape() noexcept {
         target_consumed_ = false;
         if (pulled_ || quote_price_ == k_null_price) {
@@ -1073,22 +1035,46 @@ private:
             return;
         }
 
-        const auto span = static_cast<std::int32_t>(cfg_.levels) *
-                          static_cast<std::int32_t>(cfg_.level_gap_ticks);
+        const auto gap = static_cast<std::int32_t>(cfg_.level_gap_ticks);
+        const auto levels = static_cast<std::int32_t>(cfg_.levels);
+        const std::int32_t last_slack = levels + static_cast<std::int32_t>(cfg_.slack_levels);
         std::int32_t lo = top_depth_;
-        std::int32_t hi = top_depth_ + span;
+        std::int32_t hi = top_depth_ + levels * gap;
         if (!ring_.band_empty()) {
             lo = std::min(lo, ring_.min_depth());
             hi = std::max(hi, ring_.max_depth());
         }
 
+        // Only rungs -- `top_depth_ + index * gap` -- can carry a target, so the
+        // walk steps a rung cursor alongside the depth rather than dividing at
+        // every depth: `level_gap_ticks` is a runtime value, and the division
+        // would cost more than the rest of the loop body. Everything in front
+        // of the quote, between rungs and past the ladder is zeroed.
+        //
+        // Rungs just past the bottom of the ladder are slack: a level already
+        // working there is kept rather than cancelled, so a one-tick flicker
+        // does not churn the tail.
+        std::int32_t rung = top_depth_;
+        std::int32_t index = 0;
         for (std::int32_t d = lo; d <= hi; ++d) {
-            const qty_t want = shape_target_at(d);
+            qty_t want = 0;
+            bool slack = false;
+            if (d == rung) {
+                if (index == 0) {
+                    want = std::min(quote_qty_, cfg_.max_level_qty);
+                } else if (index <= levels) {
+                    want = shape_qty(static_cast<std::uint16_t>(index - 1));
+                } else {
+                    slack = index <= last_slack;
+                }
+                rung += gap;
+                ++index;
+            }
             level_type* l = (want != 0) ? ring_.try_at(d) : ring_.peek(d);
             if (l == nullptr) {
                 continue;
             }
-            if (want == 0 && in_slack(d) && l->working() > 0) {
+            if (slack && l->working() > 0) {
                 l->target = std::min(l->target, slack_retain_qty());
                 continue;
             }

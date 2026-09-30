@@ -137,6 +137,64 @@ TEST(StackerSlack, RetainedLevelIsTrimmedToTheRungSize) {
     EXPECT_CONSISTENT(h);
 }
 
+// With a gap, slack is counted in rungs, not ticks: the levels one and two
+// rungs past the ladder are retained, and nothing in between.
+TEST(StackerSlack, WithAGapSlackIsCountedInRungs) {
+    auto cfg = base_cfg();
+    cfg.level_gap_ticks = 2;
+    cfg.slack_levels = 1;
+    buy_harness h{cfg};
+
+    h.quote(1000, 25);  // rungs 1000, 980, 960
+    h.ack_all();
+    ASSERT_EQ(h.working(960), 10);
+
+    auto mark = h.exec.mark();
+    h.quote(1020, 25);  // rungs 1020, 1000, 980; 960 is the slack rung
+    h.settle();
+    EXPECT_EQ(h.working(1020), 25);
+    EXPECT_EQ(h.working(1000), 10);
+    EXPECT_EQ(h.working(980), 10);
+    EXPECT_EQ(h.working(960), 10) << "one rung of slack is kept";
+    EXPECT_EQ(h.exec.count(mock_executor::kind::cancel, mark), 0u);
+    EXPECT_CONSISTENT(h);
+
+    mark = h.exec.mark();
+    h.quote(1040, 25);  // rungs 1040, 1020, 1000; 980 is slack, 960 is past it
+    h.settle();
+    EXPECT_EQ(h.working(1040), 25);
+    EXPECT_EQ(h.working(1020), 10);
+    EXPECT_EQ(h.working(1000), 10);
+    EXPECT_EQ(h.working(980), 10) << "the new slack rung is kept";
+    EXPECT_EQ(h.working(960), 0) << "two rungs past the ladder is beyond one level of slack";
+    EXPECT_EQ(h.exec.count(mock_executor::kind::cancel, mark), 1u);
+    EXPECT_CONSISTENT(h);
+}
+
+// An odd move puts every old level between the new rungs. None of them is a
+// slack rung, so none is retained, however close it sits to the ladder.
+TEST(StackerSlack, WithAGapLevelsBetweenRungsAreNotSlack) {
+    auto cfg = base_cfg();
+    cfg.level_gap_ticks = 2;
+    cfg.slack_levels = 1;
+    buy_harness h{cfg};
+
+    h.quote(1000, 25);  // rungs 1000, 980, 960
+    h.ack_all();
+
+    const auto mark = h.exec.mark();
+    h.quote(1010, 25);  // rungs 1010, 990, 970; slack rung 950
+    h.settle();
+    EXPECT_EQ(h.working(1010), 25);
+    EXPECT_EQ(h.working(990), 10);
+    EXPECT_EQ(h.working(970), 10);
+    EXPECT_EQ(h.working(1000), 0);
+    EXPECT_EQ(h.working(980), 0);
+    EXPECT_EQ(h.working(960), 0);
+    EXPECT_EQ(h.exec.count(mock_executor::kind::cancel, mark), 3u);
+    EXPECT_CONSISTENT(h);
+}
+
 TEST(StackerSlack, SlackDoesNotCreateOrdersOfItsOwn) {
     auto cfg = base_cfg();
     cfg.slack_levels = 2;
