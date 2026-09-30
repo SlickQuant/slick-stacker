@@ -452,6 +452,7 @@ TEST(StackerShape, ClampedLadderKeepsTheLeadingRungsOfItsProfile) {
     cfg.qty_profile = profile;
     buy_harness h{cfg};
     ASSERT_EQ(h.st.config().levels, 12u);
+    EXPECT_EQ(h.st.config().qty_profile.size(), 12u) << "config() reports the kept rungs";
 
     h.quote(1000, 25);
     h.ack_all();
@@ -569,5 +570,78 @@ TEST(StackerShape, ZeroTickAndGapAreSanitizedRatherThanDividedBy) {
     h.settle();
     EXPECT_EQ(h.working(1010), 25);
     EXPECT_EQ(h.working(1009), 10);
+    EXPECT_CONSISTENT(h);
+}
+
+// config() used to clear `qty_profile` once the stacker had copied it, so a
+// caller cloning the running config silently lost a valid custom profile.
+TEST(StackerShape, ConfigReportsTheProfileInForce) {
+    using slick::stacker::config_error;
+    static constexpr std::array<qty_t, 3> profile{30, 20, 5};
+    auto cfg = base_cfg();
+    cfg.qty_profile = profile;
+    buy_harness h{cfg};
+
+    const auto& running = h.st.config();
+    ASSERT_EQ(running.qty_profile.size(), 3u);
+    EXPECT_EQ(running.qty_profile[0], 30);
+    EXPECT_EQ(running.qty_profile[2], 5);
+    EXPECT_NE(running.qty_profile.data(), profile.data()) << "the stacker's own copy";
+    EXPECT_EQ(running.validate<test_traits>(), config_error::ok);
+
+    // A stacker cloned from the running config builds the same shape.
+    buy_harness clone{h.st.config()};
+    clone.quote(1000, 25);
+    clone.ack_all();
+    EXPECT_EQ(clone.working(990), 30);
+    EXPECT_EQ(clone.working(980), 20);
+    EXPECT_EQ(clone.working(970), 5);
+    EXPECT_CONSISTENT(clone);
+
+    // Handing a stacker its own config back leaves the profile intact.
+    h.st.configure(h.st.config());
+    h.quote(1000, 25);
+    h.ack_all();
+    EXPECT_EQ(h.working(990), 30);
+    EXPECT_EQ(h.working(970), 5);
+    EXPECT_CONSISTENT(h);
+}
+
+// A profile waiting for a ladder it describes is not in force, so config()
+// does not report it until set_levels asks for that ladder.
+TEST(StackerShape, ConfigOmitsAProfileThatIsNotInForce) {
+    static constexpr std::array<qty_t, 5> five{9, 8, 7, 6, 5};
+    buy_harness h{base_cfg()};  // 3 levels
+    h.st.set_qty_profile(five);
+    EXPECT_TRUE(h.st.config().qty_profile.empty());
+
+    h.st.set_levels(5);
+    ASSERT_EQ(h.st.config().qty_profile.size(), 5u);
+    EXPECT_EQ(h.st.config().qty_profile[4], 5);
+
+    h.st.set_levels(2);
+    EXPECT_TRUE(h.st.config().qty_profile.empty()) << "stale once the ladder changes";
+}
+
+// sanitized() cannot rewrite entries of a span it only borrows, so a negative
+// profile entry is the one thing validate still rejects in its result. The
+// stacker clamps its own copy, so its config() validates regardless.
+TEST(StackerShape, NegativeProfileEntriesAreClampedInTheRunningConfig) {
+    using slick::stacker::config_error;
+    static constexpr std::array<qty_t, 3> profile{-5, 20, 5};
+    auto cfg = base_cfg();
+    cfg.qty_profile = profile;
+    EXPECT_EQ(cfg.sanitized<test_traits>().validate<test_traits>(), config_error::negative_qty);
+
+    buy_harness h{cfg};
+    const auto& running = h.st.config();
+    ASSERT_EQ(running.qty_profile.size(), 3u);
+    EXPECT_EQ(running.qty_profile[0], 0);
+    EXPECT_EQ(running.validate<test_traits>(), config_error::ok);
+
+    h.quote(1000, 25);
+    h.ack_all();
+    EXPECT_EQ(h.working(990), 0);
+    EXPECT_EQ(h.working(980), 20);
     EXPECT_CONSISTENT(h);
 }

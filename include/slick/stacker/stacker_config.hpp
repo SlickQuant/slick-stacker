@@ -215,10 +215,11 @@ struct stacker_config {
     }
 
     /// A copy with every field `validate` would reject replaced by the nearest
-    /// usable value, so nothing the stacker computes from it can divide by zero
-    /// or run off the end of the ring. This is what the stacker runs on; it is
-    /// a guard against a bad config doing harm, not a substitute for checking
-    /// it -- a zero `tick_size` becomes 1, which is rarely the venue's grid.
+    /// usable value -- all but one, below -- so nothing the stacker computes
+    /// from it can divide by zero or run off the end of the ring. This is
+    /// what the stacker runs on; it is a guard against a bad config doing
+    /// harm, not a substitute for checking it -- a zero `tick_size` becomes 1,
+    /// which is rarely the venue's grid.
     ///
     ///   - `tick_size <= 0` becomes 1, `level_gap_ticks == 0` becomes 1.
     ///   - `levels` is clamped by `clamp_levels`.
@@ -229,8 +230,10 @@ struct stacker_config {
     ///     `max_order_qty` below `min_order_qty` is raised to it.
     ///   - `max_orders_per_level` and `max_inflight_modifies` of 0 become 1.
     ///
-    /// Negative entries inside `qty_profile` cannot be fixed in a borrowed
-    /// span; the stacker clamps them to 0 as it copies the profile.
+    /// The exception is a negative entry inside `qty_profile`. The span is
+    /// borrowed, so it cannot be rewritten here, and `validate` on the result
+    /// still reports `negative_qty`. The stacker clamps such entries to 0 as
+    /// it copies the profile, so its own `config()` always validates.
     template <class Traits = default_traits>
     [[nodiscard]] constexpr stacker_config sanitized() const noexcept {
         auto non_negative = [](qty_t q) { return q < 0 ? qty_t{0} : q; };

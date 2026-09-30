@@ -152,8 +152,10 @@ changed costs a few nanoseconds and sends nothing at all.
 `cfg.validate<Traits>()` returns a `config_error` describing the first problem,
 or `config_error::ok`. Validate your config: a bad one is a bug in the caller.
 The stacker will not be corrupted by one, though — it runs on
-`cfg.sanitized<Traits>()`, which replaces every field `validate` would reject
-with the nearest usable value, and `config()` returns that sanitized copy:
+`cfg.sanitized<Traits>()`, which replaces the fields `validate` would reject
+with the nearest usable value. `config()` returns the config actually in force,
+including the stacker's own copy of the profile, and it always passes
+`validate`:
 
 - `tick_size <= 0` and `level_gap_ticks == 0` become 1. A tick of 1 is rarely
   the venue's grid, which is why validating is still on you.
@@ -161,7 +163,10 @@ with the nearest usable value, and `config()` returns that sanitized copy:
   at the configured gap and slack (`cfg.max_fitting_levels<Traits>()`), which
   `validate` reports as `ladder_exceeds_capacity`. A `qty_profile` sized for
   the requested `levels` keeps its leading entries; a profile of any other size
-  is dropped in favour of `stack_qty`.
+  is dropped in favour of `stack_qty`. Negative entries in the profile are
+  clamped to 0 as the stacker copies it — `sanitized()` itself cannot rewrite a
+  span it only borrows, so it is the one thing `validate` can still reject in
+  its result.
 - Negative quantities become 0, `qty_increment <= 0` becomes 1, a
   `max_order_qty` below `min_order_qty` is raised to it, and a zero
   `max_orders_per_level` or `max_inflight_modifies` becomes 1.

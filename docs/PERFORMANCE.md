@@ -149,8 +149,12 @@ The orders are sized so that none completes during a run.
 is a fill, spread across all nine levels — an update the next reconcile
 genuinely depends on — and the reconcile runs every pass over the band to
 re-decide each level. With `refill_on_fill` off a fill takes the target down
-with the resting quantity, so the reconcile sends nothing and the state is the
-same at the start of every iteration. One fill plus one reconcile costs 124 ns,
+with the resting quantity, so every level stays exactly at target and the
+reconcile sends nothing. The state is not literally unchanged — each fill adds
+to an order's filled quantity and takes one off its level's target — but the
+orders are sized so that none completes and no target reaches zero during a
+run, so every iteration walks the same levels and orders and reaches the same
+decisions. One fill plus one reconcile costs 124 ns,
 of which the reconcile is roughly 80; thirty-two fills plus one reconcile cost
 1.44 µs, about 45 ns per event — the reconcile has been amortised down to a few
 nanoseconds each. This is why the event handlers never send.

@@ -192,8 +192,9 @@ BENCHMARK(BM_OnFilled);
 // level of the stack: each one marks the stacker dirty, and the reconcile then
 // runs every pass over the band to re-decide each level. With `refill_on_fill`
 // off a fill takes the level's target down with its resting quantity, so the
-// reconcile finds nothing to send and the state is the same at the start of
-// every iteration.
+// reconcile finds nothing to send. Quantities drift by one per fill, but at
+// `k_bottomless` no order completes and no target reaches zero, so every
+// iteration walks the same levels and orders and reaches the same decisions.
 static void BM_EventBatchThenReconcile(benchmark::State& state) {
     const auto batch = static_cast<std::size_t>(state.range(0));
     bench_executor exec;

@@ -413,6 +413,13 @@ public:
     // Runtime configuration
     // -----------------------------------------------------------------------
 
+    /// The configuration the stacker is running on, which always passes
+    /// `validate<Traits>()`.
+    ///
+    /// Its `qty_profile` is the profile in force, and points at the stacker's
+    /// own copy: valid for the stacker's lifetime, and rewritten by the next
+    /// `configure`, `set_qty_profile` or `set_levels`. Passing the config
+    /// straight to `configure` -- of this stacker or another -- is safe.
     [[nodiscard]] const stacker_config& config() const noexcept { return cfg_; }
 
     /// Replace the whole configuration. `tick_size` changes force the price
@@ -426,7 +433,7 @@ public:
         const bool grid_changed = anchored_ && next.tick_size != cfg_.tick_size;
         const bool type_changed = next.order_type != cfg_.order_type;
         cfg_ = next;
-        cfg_.qty_profile = {};  // the span is copied below; do not retain it
+        // Copies the caller's span and repoints `cfg_.qty_profile` at the copy.
         set_qty_profile(next.qty_profile);
         if (grid_changed) {
             rebase(quote_price_);
@@ -462,6 +469,7 @@ public:
         } else if (profile_len_ != cfg_.levels) {
             profile_len_ = 0;  // a stale profile no longer describes the ladder
         }
+        publish_profile();
         shape_dirty_ = true;
         dirty_ = true;
     }
@@ -473,13 +481,19 @@ public:
     }
 
     /// Per-level target quantities, index 0 being the level nearest the quote.
-    /// An empty span reverts to the uniform `stack_qty`. The span is copied.
+    /// An empty span reverts to the uniform `stack_qty`. The span is copied,
+    /// with negative entries clamped to 0.
+    ///
+    /// A profile whose size does not match `levels` is kept but not used --
+    /// nor reported by `config()` -- until `set_levels` asks for a ladder it
+    /// describes.
     void set_qty_profile(std::span<const qty_t> profile) noexcept {
         profile_len_ = static_cast<std::uint16_t>(
             std::min<std::size_t>(profile.size(), Traits::max_levels));
         for (std::uint16_t i = 0; i < profile_len_; ++i) {
             profile_[i] = profile[i] < 0 ? 0 : profile[i];
         }
+        publish_profile();
         shape_dirty_ = true;
         dirty_ = true;
     }
@@ -966,9 +980,21 @@ private:
     // Shape
     // -----------------------------------------------------------------------
 
+    /// True when the stored profile describes the ladder and so overrides
+    /// `stack_qty`.
+    [[nodiscard]] bool profile_in_force() const noexcept {
+        return profile_len_ != 0 && profile_len_ == cfg_.levels;
+    }
+
+    /// Point `cfg_.qty_profile` at the stored profile while it is in force,
+    /// so `config()` reports what the shape is built from.
+    void publish_profile() noexcept {
+        cfg_.qty_profile = profile_in_force() ? std::span<const qty_t>{profile_, profile_len_}
+                                              : std::span<const qty_t>{};
+    }
+
     [[nodiscard]] qty_t shape_qty(std::uint16_t index) const noexcept {
-        const qty_t q = (profile_len_ == cfg_.levels && profile_len_ != 0) ? profile_[index]
-                                                                          : cfg_.stack_qty;
+        const qty_t q = profile_in_force() ? profile_[index] : cfg_.stack_qty;
         return cfg_.max_level_qty == k_no_qty_limit ? q : std::min(q, cfg_.max_level_qty);
     }
 
