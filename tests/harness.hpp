@@ -48,15 +48,29 @@ public:
     /// Deliver the venue's response to every message sent since the last call.
     /// Acks land in the order they were sent, which is what a real session does
     /// on a single connection.
-    void ack_all() {
+    void ack_all() { ack_all_adjusting(Executor::invalid_order_id, 0, 0); }
+
+    /// As `ack_all()`, except the venue books `id` at `price`/`qty` rather than
+    /// what was asked for -- the way a venue rounds a quantity down or slides a
+    /// price when it accepts an order or a modify.
+    void ack_all_adjusting(order_id_t id, price_t price, qty_t qty) {
         while (cursor_ < exec.log.size()) {
-            const auto m = exec.log[cursor_++];
+            auto m = exec.log[cursor_++];
+            const bool adjust = m.id == id && m.type != mock_executor::kind::cancel;
+            if (m.type == mock_executor::kind::modify) {
+                exec.confirm_modify(m.id);
+            }
+            if (adjust) {
+                m.price = price;
+                m.qty = qty;
+                exec.orders[m.id].price = price;
+                exec.orders[m.id].qty = qty;
+            }
             switch (m.type) {
                 case mock_executor::kind::place:
                     st.on_accepted(m.id, m.price, m.qty);
                     break;
                 case mock_executor::kind::modify:
-                    exec.confirm_modify(m.id);
                     st.on_replaced(m.id, m.price, m.qty);
                     break;
                 case mock_executor::kind::cancel: {

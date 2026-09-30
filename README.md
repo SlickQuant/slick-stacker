@@ -126,6 +126,11 @@ A burst of twenty fills costs one recalculation rather than twenty, and no
 intermediate state ever reaches the wire. Re-asserting a quote that has not
 changed costs a few nanoseconds and sends nothing at all.
 
+Pass `on_accepted` and `on_replaced` the price and quantity the venue actually
+booked, even when they differ from the request. Once the order owes no further
+answers, the booked values become what the stacker believes is working, and
+the next `reconcile()` reprices or tops up toward the target.
+
 ## Configuration
 
 | Field | Meaning |

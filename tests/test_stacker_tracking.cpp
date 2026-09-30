@@ -227,6 +227,74 @@ TEST(StackerTracking, ModifyAcknowledgedAtADifferentLevel) {
     EXPECT_CONSISTENT(h);
 }
 
+// An acknowledgement carries what the venue booked, which need not be what we
+// asked for. What it booked is what is working, and the shortfall is ours to
+// make up -- the order must not go on reporting the requested quantity.
+TEST(StackerTracking, AcceptForLessThanRequestedIsToppedUp) {
+    buy_harness h{base_cfg()};
+    h.quote(1000, 25);
+    const auto id = placed_at(h.exec, 1000);
+    ASSERT_NE(id, mock_executor::invalid_order_id);
+
+    h.ack_all_adjusting(id, 1000, 20);
+    EXPECT_EQ(h.acked(1000), 20);
+    EXPECT_EQ(h.working(1000), 20) << "the requested 25 is not what is working";
+    EXPECT_TRUE(h.st.dirty());
+    ASSERT_CONSISTENT(h);
+
+    h.settle();
+    EXPECT_EQ(h.working(1000), 25);
+    EXPECT_EQ(h.exec.venue_qty_at(1000), 25);
+    EXPECT_CONSISTENT(h);
+
+    const auto mark = h.exec.mark();
+    h.reconcile();
+    EXPECT_EQ(h.exec.total(mark), 0u) << "a settled stack must go quiet";
+}
+
+TEST(StackerTracking, AcceptAtAnotherPriceIsFiledWhereItRests) {
+    buy_harness h{base_cfg()};
+    h.quote(1000, 25);
+    const auto id = placed_at(h.exec, 1000);
+    ASSERT_NE(id, mock_executor::invalid_order_id);
+
+    h.ack_all_adjusting(id, 990, 25);
+    EXPECT_EQ(h.working(1000), 0);
+    EXPECT_EQ(h.acked(990), 35);
+    EXPECT_EQ(h.working(990), 35);
+    ASSERT_CONSISTENT(h);
+
+    h.settle();
+    EXPECT_EQ(h.working(1000), 25);
+    EXPECT_EQ(h.working(990), 10);
+    EXPECT_EQ(h.exec.venue_qty_at(1000), 25);
+    EXPECT_EQ(h.exec.venue_qty_at(990), 10);
+    EXPECT_EQ(h.exec.venue_qty_at(980), 10);
+    EXPECT_CONSISTENT(h);
+}
+
+TEST(StackerTracking, ReplaceForADifferentQuantityIsCorrected) {
+    buy_harness h{base_cfg()};
+    h.quote(1000, 25);
+    h.ack_all();
+    const auto id = placed_at(h.exec, 1000);
+
+    const auto mark = h.exec.mark();
+    h.quote(1000, 15);
+    ASSERT_EQ(h.exec.count(mock_executor::kind::modify, mark), 1u);
+    ASSERT_EQ(h.exec.log[mark].id, id);
+
+    // Asked to come down to 15, the venue only came down to 20.
+    h.ack_all_adjusting(id, 1000, 20);
+    EXPECT_EQ(h.working(1000), 20);
+    ASSERT_CONSISTENT(h);
+
+    h.settle();
+    EXPECT_EQ(h.working(1000), 15);
+    EXPECT_EQ(h.exec.venue_qty_at(1000), 15);
+    EXPECT_CONSISTENT(h);
+}
+
 TEST(StackerTracking, EventsForUnknownIdentifiersAreIgnored) {
     buy_harness h{base_cfg()};
     h.quote(1000, 25);

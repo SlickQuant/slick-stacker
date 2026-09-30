@@ -1510,10 +1510,24 @@ private:
             return;
         }
 
+        if (s.state == order_state_t::live && s.pending == pending_action_t::none &&
+            !s.settled()) {
+            // The last answer the venue owed us, and it booked something other
+            // than what we asked for. Its word is final: adopt it as our intent
+            // so the level is credited with what is really working there, and
+            // let the next reconcile reprice or top up toward the target. Left
+            // alone, the slot would report the requested quantity as working
+            // forever and nothing would ever correct it.
+            rollback_to_acked(si);
+        }
+
         drain_pending(si);
         dirty_ = true;
     }
 
+    /// Make the venue's last confirmed price and quantity our intent, and file
+    /// the order under the level it actually rests at. Used when a modify is
+    /// rejected and when an acknowledgement books something we did not ask for.
     void rollback_to_acked(slot_index_t si) noexcept {
         slot_type& s = pool_[si];
 
