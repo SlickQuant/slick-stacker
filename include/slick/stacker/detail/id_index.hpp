@@ -7,6 +7,7 @@
 #include <slick/stacker/config.hpp>
 #include <slick/stacker/types.hpp>
 
+#include <bit>
 #include <cstdint>
 #include <type_traits>
 
@@ -22,10 +23,14 @@ namespace detail {
     return r;
 }
 
-/// Finalizer of a 64-bit mix. Order identifiers are frequently sequential, and
-/// a raw sequential key against a masked table produces long probe runs the
-/// moment ids are recycled unevenly. Mixing costs three multiplies and buys a
-/// flat distribution regardless of what the venue hands out.
+/// Fibonacci hash of an order identifier; the quality is in the *top* bits, so
+/// callers shift rather than mask. Identifiers are frequently sequential, and a
+/// raw sequential key against a masked table produces long probe runs the
+/// moment ids are recycled unevenly. Multiplying by 2^64/phi spreads any run
+/// of consecutive or evenly strided keys near-uniformly across the top bits,
+/// for one multiply on a path that costs a handful of nanoseconds in all.
+/// Folding the high word in first keeps keys whose entropy sits only in their
+/// upper bits -- a venue prefix, a pointer's page -- from collapsing together.
 template <class Id>
 [[nodiscard]] inline std::uint64_t id_hash(const Id& id) noexcept {
     std::uint64_t x;
@@ -34,12 +39,8 @@ template <class Id>
     } else {
         x = static_cast<std::uint64_t>(static_cast<std::make_unsigned_t<Id>>(id));
     }
-    x ^= x >> 33;
-    x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33;
-    x *= 0xc4ceb9fe1a85ec53ULL;
-    x ^= x >> 33;
-    return x;
+    x ^= x >> 32;
+    return x * 0x9E3779B97F4A7C15ULL;
 }
 
 /// Fixed-capacity open-addressing map from order id to slot index.
@@ -58,6 +59,7 @@ class id_index {
     static_assert((Capacity & (Capacity - 1)) == 0, "capacity must be a power of two");
 
     static constexpr std::uint32_t k_mask = Capacity - 1;
+    static constexpr int k_shift = 64 - std::countr_zero(Capacity);  // keep log2(Capacity) top bits
 
     struct entry {
         Id id{};
@@ -160,7 +162,7 @@ public:
 
 private:
     [[nodiscard]] static std::uint32_t home(const Id& id) noexcept {
-        return static_cast<std::uint32_t>(id_hash(id)) & k_mask;
+        return static_cast<std::uint32_t>(id_hash(id) >> k_shift);
     }
 
     entry entries_[Capacity]{};

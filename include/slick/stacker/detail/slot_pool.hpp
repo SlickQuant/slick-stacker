@@ -47,8 +47,11 @@ public:
     void release(slot_index_t idx) noexcept {
         SLICK_STACKER_ASSERT(idx < Capacity);
         SLICK_STACKER_ASSERT(in_use_ > 0);
+        // `acquire` clears the whole slot, so clearing it here too would be a
+        // second 80-byte store per order. Marking it free is enough: every
+        // reader of a slot tests `active()` before looking at anything else.
         slot_type& s = slots_[idx];
-        s = slot_type{};
+        s.state = order_state_t::free;
         s.next = free_head_;
         free_head_ = idx;
         --in_use_;

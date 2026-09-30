@@ -63,6 +63,9 @@ TEST(SlotPool, AcquireReleaseRoundTrip) {
     pool.release(a);
     EXPECT_EQ(pool.in_use(), 0u);
     EXPECT_TRUE(pool.empty());
+    // Release only marks the slot free; that alone must make it unmatchable,
+    // since routing by user data compares the id only for an active slot.
+    EXPECT_FALSE(pool[a].active());
 
     // A recycled slot must come back clean -- stale state here would let a
     // freed order's quantity leak into a new level's accounting.

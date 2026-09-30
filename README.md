@@ -307,6 +307,12 @@ the exact environment, and how to reproduce.
 | Route an order event | ~9 ns hashed, ~7 ns with user data |
 | Apply a fill | ~48 ns |
 
+The library is header-only, so the stacker itself always compiles inside your
+translation unit. Your executor is the part that may not: `get_order_user_data`
+runs on every event and `place`/`modify`/`cancel` on every message, so define
+them where the stacker can see them (in a header), or build with link-time
+optimisation (`/GL` + `/LTCG`, `-flto`) if they live in a separate `.cpp`.
+
 ## Building and testing
 
 ```sh
