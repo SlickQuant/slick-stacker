@@ -22,7 +22,8 @@ using price_t = std::int64_t;
 using qty_t = std::int64_t;
 
 /// Index into the order slot pool. `uint16_t` keeps the intrusive links small
-/// enough that a slot's hot fields stay inside one cache line.
+/// enough that a slot's hot fields -- see `detail::order_slot` -- fit in the
+/// first 32 bytes.
 using slot_index_t = std::uint16_t;
 
 /// Sentinel for "no slot".

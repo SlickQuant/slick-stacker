@@ -24,29 +24,15 @@ namespace detail {
 /// While a request is outstanding the two disagree, and a modify reject rolls
 /// the second pair back onto the first. Level accounting is derived from both;
 /// see `slot_contribution`.
+///
+/// Field order is a cache decision. Everything that routing an event and the
+/// queue/book feeds read -- `id` through `flags`, 29 bytes with a 64-bit id --
+/// comes first, so those paths touch one cache line instead of two; the prices
+/// and quantity counters follow, read by paths that touch the whole slot anyway.
 template <OrderIdLike Id>
 struct order_slot {
     /// Identifier the executor returned from `place`.
     Id id{};
-
-    /// Price we want this order resting at -- the level it is booked under.
-    price_t price = 0;
-
-    /// Price the venue last confirmed.
-    price_t acked_price = 0;
-
-    /// Quantity as of our most recent request.
-    qty_t order_qty = 0;
-
-    /// Quantity the venue last confirmed.
-    qty_t acked_qty = 0;
-
-    /// Cumulative executed quantity.
-    qty_t filled = 0;
-
-    /// Cumulative cancelled quantity, including partial reductions the venue
-    /// reports as cancels.
-    qty_t canceled = 0;
 
     /// Market quantity ahead of this order in the queue, from
     /// `stacker::on_queue_position`. Only meaningful when `flag_qp_valid` is
@@ -102,6 +88,25 @@ struct order_slot {
 
     /// The slot is present in a level's order list.
     static constexpr std::uint8_t flag_linked = 1u << 3;
+
+    /// Price we want this order resting at -- the level it is booked under.
+    price_t price = 0;
+
+    /// Price the venue last confirmed.
+    price_t acked_price = 0;
+
+    /// Quantity as of our most recent request.
+    qty_t order_qty = 0;
+
+    /// Quantity the venue last confirmed.
+    qty_t acked_qty = 0;
+
+    /// Cumulative executed quantity.
+    qty_t filled = 0;
+
+    /// Cumulative cancelled quantity, including partial reductions the venue
+    /// reports as cancels.
+    qty_t canceled = 0;
 
     [[nodiscard]] constexpr bool has_flag(std::uint8_t f) const noexcept {
         return (flags & f) != 0;

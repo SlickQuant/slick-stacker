@@ -4,8 +4,10 @@
 #include <gtest/gtest.h>
 #include <slick/stacker/detail/slot_pool.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <set>
+#include <type_traits>
 #include <vector>
 
 using slick::stacker::k_null_slot;
@@ -20,6 +22,26 @@ namespace {
 using pool_t = slot_pool<std::uint64_t, 8>;
 
 }  // namespace
+
+// Routing an event and the queue/book feeds read only the leading fields of a
+// slot. Keeping them in the first 32 bytes is what lets those paths touch one
+// cache line; a reorder that pushes one of them back must fail here.
+TEST(SlotPool, HotFieldsLeadTheSlot) {
+    using slot = order_slot<std::uint64_t>;
+    static_assert(std::is_standard_layout_v<slot>);
+    static_assert(offsetof(slot, id) == 0);
+    static_assert(offsetof(slot, qty_in_front) + sizeof(slot::qty_in_front) <= 32);
+    static_assert(offsetof(slot, linked_depth) + sizeof(slot::linked_depth) <= 32);
+    static_assert(offsetof(slot, next) + sizeof(slot::next) <= 32);
+    static_assert(offsetof(slot, prev) + sizeof(slot::prev) <= 32);
+    static_assert(offsetof(slot, state) + sizeof(slot::state) <= 32);
+    static_assert(offsetof(slot, inflight_modifies) + sizeof(slot::inflight_modifies) <= 32);
+    static_assert(offsetof(slot, pending) + sizeof(slot::pending) <= 32);
+    static_assert(offsetof(slot, order_type) + sizeof(slot::order_type) <= 32);
+    static_assert(offsetof(slot, flags) + sizeof(slot::flags) <= 32);
+    static_assert(sizeof(slot) == 80, "the reorder must not grow the slot");
+    SUCCEED();
+}
 
 TEST(SlotPool, StartsEmpty) {
     pool_t pool;
