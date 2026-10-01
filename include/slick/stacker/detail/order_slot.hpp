@@ -89,6 +89,11 @@ struct order_slot {
     /// The slot is present in a level's order list.
     static constexpr std::uint8_t flag_linked = 1u << 3;
 
+    /// The venue terminally rejected a modify of this order. Resending it would
+    /// only be rejected again, so the order is never modified from here on:
+    /// it is cancelled where it would have been shrunk or repriced.
+    static constexpr std::uint8_t flag_no_modify = 1u << 4;
+
     /// Price we want this order resting at -- the level it is booked under.
     price_t price = 0;
 

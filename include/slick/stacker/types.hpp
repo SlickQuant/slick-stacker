@@ -100,9 +100,27 @@ enum class pending_action_t : std::uint8_t {
     modify,
 };
 
-/// Why the venue rejected a request. `retryable` and `throttled` leave the
-/// stacker's target untouched so the next reconcile tries again; everything
-/// else is treated as terminal for the order in question.
+/// Why the venue rejected a request.
+///
+/// `throttled` and `retryable` -- see `is_retryable` -- change nothing, so the
+/// next reconcile sends the same request again. Every other reason, `unknown`
+/// included, is terminal for what was asked:
+///
+///   * A rejected new order, or a rejected modify that moved an order to a new
+///     price, latches that price's level: nothing that would add quantity there
+///     is sent again until the caller changes the level's target or calls
+///     `stacker::clear_rejects()`. The target itself is left alone, so
+///     `target_at` still reports what the caller asked for.
+///   * A rejected modify also marks the order as one the venue will not amend.
+///     It is never modified again; when it has to shrink or move it is
+///     cancelled, and the add pass replaces whatever is still wanted.
+///
+/// `too_late_to_act` on a modify means the order is already finishing, not that
+/// the price was wrong, so it marks the order but latches no level.
+///
+/// A rejected cancel is retried whatever the reason, because a cancel only ever
+/// takes exposure off -- except `too_late_to_act`, which waits for the fill or
+/// cancel that is already on its way.
 enum class reject_reason_t : std::uint8_t {
     unknown = 0,
     throttled,        ///< rate limited; safe to retry

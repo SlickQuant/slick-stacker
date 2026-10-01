@@ -131,6 +131,33 @@ booked, even when they differ from the request. Once the order owes no further
 answers, the booked values become what the stacker believes is working, and
 the next `reconcile()` reprices or tops up toward the target.
 
+### Rejects
+
+Pass every reject's `reject_reason_t` through; the stacker's response depends on
+it.
+
+- `throttled` and `retryable` (`is_retryable(reason)`) change nothing: the
+  next `reconcile()` sends the same request again.
+- Every other reason, `unknown` included, is terminal. A rejected new order, or
+  a rejected modify that was moving an order to a new price, **latches** that
+  price: nothing more is sent there until a quote changes that level's target
+  or you call `clear_rejects()`. Re-asserting the same quote does not lift it,
+  so an `invalid_price` or `risk_limit` cannot become a reject-and-resend loop.
+  `target_at` still reports what you asked for; `rejected_at(price)` says
+  whether the stacker is holding off.
+- A terminally rejected modify also marks the order as one the venue will not
+  amend. It is never modified again: where it would have been shrunk or
+  repriced it is cancelled, and the add pass replaces what is still wanted.
+  `too_late_to_act` does this too, but latches no price — the order was
+  finishing, not misplaced.
+- A rejected cancel is always retried, since a cancel only ever takes exposure
+  off — except `too_late_to_act`, which waits for the fill or cancel already on
+  its way.
+
+Call `clear_rejects()` (on a `stacker_pair`, both sides) once whatever made the
+venue refuse — a risk limit, a price band, a closed session — has been dealt
+with.
+
 ## Configuration
 
 | Field | Meaning |

@@ -51,6 +51,12 @@ struct level {
     /// False until the slot has been claimed for `depth`.
     bool bound = false;
 
+    /// The venue terminally refused quantity at this price -- a new order, or a
+    /// modify moving one here. Reconcile adds nothing more until the caller
+    /// changes `target` or clears the latch, so a price the venue will not
+    /// take cannot turn into a reject-and-resend loop.
+    bool rejected = false;
+
     [[nodiscard]] constexpr qty_t working() const noexcept { return acked + inflight; }
 
     /// Positive when the level is short of its target, negative when it is

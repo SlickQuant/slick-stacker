@@ -327,7 +327,7 @@ TEST(StackerChainedModify, RejectOfTheLastLinkRollsBackToTheLastAck) {
 
     h.st.on_replaced(id, 1000, 20);  // first link confirmed
     ASSERT_CONSISTENT(h);
-    h.st.on_modify_rejected(id, reject_reason_t::terminal);
+    h.st.on_modify_rejected(id, reject_reason_t::retryable);
 
     EXPECT_EQ(h.acked(1000), 20);
     EXPECT_EQ(h.working(1000), 20) << "reality is what the last acknowledgement said";

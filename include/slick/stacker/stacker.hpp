@@ -128,6 +128,24 @@ public:
         dirty_ = true;
     }
 
+    /// Lift every reject latch, so the next `reconcile()` tries again at the
+    /// prices the venue terminally refused -- for when whatever made it refuse
+    /// them, a risk limit or a price band, has since been dealt with. A latch
+    /// also lifts on its own when a quote changes that level's target. Orders
+    /// the venue would not modify stay that way.
+    void clear_rejects() noexcept {
+        if (!anchored_ || ring_.band_empty()) {
+            return;
+        }
+        for (std::int32_t d = ring_.min_depth(); d <= ring_.max_depth(); ++d) {
+            level_type* l = ring_.peek(d);
+            if (l != nullptr && l->rejected) {
+                l->rejected = false;
+                dirty_ = true;
+            }
+        }
+    }
+
     /// True when there is work outstanding for `reconcile()`.
     [[nodiscard]] bool dirty() const noexcept { return dirty_; }
 
@@ -355,12 +373,18 @@ public:
         dirty_ = true;
     }
 
-    /// A new order was rejected: it never existed at the venue.
+    /// A new order was rejected: it never existed at the venue. Unless the
+    /// reason is retryable, the price it was sent at is latched and gets no
+    /// new quantity until its target changes -- see `reject_reason_t`.
     void on_rejected(const order_id_t& id, reject_reason_t reason) noexcept {
-        (void)reason;
         const slot_index_t si = lookup(id);
         if (si == k_null_slot) {
             return;
+        }
+        if (!is_retryable(reason)) {
+            // `acked_price` is where the order was placed. `price` may already
+            // carry a reprice deferred onto the acknowledgement that never came.
+            latch_reject(pool_[si], pool_[si].acked_price);
         }
         retire(si);
         dirty_ = true;
@@ -368,9 +392,10 @@ public:
 
     /// A modify was rejected. The order is still working at whatever the venue
     /// last confirmed, so intent is rolled back onto that and the slot is
-    /// re-homed to the level it actually rests on.
+    /// re-homed to the level it actually rests on. Unless the reason is
+    /// retryable the order is never modified again, and a price it was being
+    /// moved to is latched -- see `reject_reason_t`.
     void on_modify_rejected(const order_id_t& id, reject_reason_t reason) noexcept {
-        (void)reason;
         const slot_index_t si = lookup(id);
         if (si == k_null_slot) {
             return;
@@ -387,7 +412,13 @@ public:
             return;
         }
 
+        // Where the refused request was taking the order. The rollback
+        // overwrites it.
+        const price_t asked = s.price;
         rollback_to_acked(si);
+        if (!is_retryable(reason)) {
+            refuse_modify(si, asked, reason);
+        }
         if (is_done(pool_[si])) {
             // The reject was "too late to act" in disguise: the order had
             // already finished. Nothing to roll back to.
@@ -541,6 +572,13 @@ public:
         return l != nullptr ? l->order_count : 0;
     }
 
+    /// True when the venue terminally refused quantity at `price` and the
+    /// stacker is holding off adding more there. See `clear_rejects()`.
+    [[nodiscard]] bool rejected_at(price_t price) const noexcept {
+        const level_type* l = level_or_null(price);
+        return l != nullptr && l->rejected;
+    }
+
     [[nodiscard]] std::uint16_t live_order_count() const noexcept { return pool_.in_use(); }
 
     /// Number of orders the stacker wanted to shrink or cancel but could not,
@@ -658,6 +696,26 @@ private:
         if (level_type* l = level_or_null(price)) {
             l->target = l->target > qty ? l->target - qty : 0;
             target_consumed_ = true;
+        }
+    }
+
+    /// Set a level's target from the caller's shape. A target that changes is
+    /// the caller asking for something new at that price, which is what lifts
+    /// a reject latch; re-asserting the same one leaves it in place.
+    static void set_target(level_type& l, qty_t q) noexcept {
+        l.rejected = l.rejected && l.target == q;
+        l.target = q;
+    }
+
+    /// The venue terminally refused quantity at `price` on behalf of `s`.
+    /// Latch the level so reconcile stops sending it more. An orphan's price
+    /// belongs to a grid that no longer exists, so it latches nothing.
+    void latch_reject(const slot_type& s, price_t price) noexcept {
+        if (s.has_flag(slot_type::flag_orphaned)) {
+            return;
+        }
+        if (level_type* l = level_or_null(price)) {
+            l->rejected = true;
         }
     }
 
@@ -839,6 +897,12 @@ private:
     /// sending now or by deferring onto its acknowledgement.
     [[nodiscard]] static bool can_act(const slot_type& s) noexcept {
         return s.state != order_state_t::pending_cancel;
+    }
+
+    /// As `can_act`, for a modify: the venue may have refused to amend this
+    /// order at all, and then only a cancel will reach it.
+    [[nodiscard]] static bool can_modify(const slot_type& s) noexcept {
+        return can_act(s) && !s.has_flag(slot_type::flag_no_modify);
     }
 
     [[nodiscard]] bool crossing_ok(price_t price) const noexcept {
@@ -1097,10 +1161,10 @@ private:
                 continue;
             }
             if (slack && l->working() > 0) {
-                l->target = std::min(l->target, slack_retain_qty());
+                set_target(*l, std::min(l->target, slack_retain_qty()));
                 continue;
             }
-            l->target = want;
+            set_target(*l, want);
         }
     }
 
@@ -1110,7 +1174,7 @@ private:
         }
         for (std::int32_t d = ring_.min_depth(); d <= ring_.max_depth(); ++d) {
             if (level_type* l = ring_.peek(d)) {
-                l->target = 0;
+                set_target(*l, 0);
             }
         }
     }
@@ -1233,7 +1297,7 @@ private:
 
     [[nodiscard]] bool wants_more(const level_type& l) const noexcept {
         const qty_t d = l.delta();
-        if (d <= 0) {
+        if (d <= 0 || l.rejected) {
             return false;
         }
         // Hysteresis only suppresses topping up a level that is already
@@ -1342,7 +1406,7 @@ private:
             slot_type& s = pool_[si];
             cursor = s.prev;  // read before a move relinks the order
             const qty_t have = s.desired();
-            if (have > 0 && have <= surplus && can_act(s) && request_modify(si, to, take)) {
+            if (have > 0 && have <= surplus && can_modify(s) && request_modify(si, to, take)) {
                 return true;
             }
         }
@@ -1383,15 +1447,15 @@ private:
                 }
             } else {
                 const qty_t keep = have - excess;
-                if (keep >= cfg_.min_order_qty) {
+                if (keep >= cfg_.min_order_qty && !s.has_flag(slot_type::flag_no_modify)) {
                     if (request_modify(si, l, keep)) {
                         excess = 0;
                     }
                 } else if (request_cancel(si)) {
-                    // The remainder would be below the minimum order size, so
-                    // there is no order that can hold it: take the whole thing
-                    // out and let the add pass re-establish the level if the
-                    // target still justifies one.
+                    // The remainder would be below the minimum order size, or
+                    // the venue will not amend this order, so nothing can hold
+                    // it: take the whole thing out and let the add pass
+                    // re-establish the level if the target still justifies one.
                     excess -= have;
                 }
             }
@@ -1613,6 +1677,29 @@ private:
             // The level it rests on is no longer addressable. Nothing sensible
             // is left to do with the order except take it out.
             orphan(si);
+        }
+    }
+
+    /// The venue terminally refused a modify that was taking `si` to `asked`,
+    /// and intent has already been rolled back. Sending the same request again
+    /// would only be refused again, so the order is not modified from here on.
+    /// Unless the venue only said the order is already finishing, the price it
+    /// refused gets no more quantity either -- otherwise the add pass would
+    /// carry the same move straight back there as a new order.
+    void refuse_modify(slot_index_t si, price_t asked, reject_reason_t reason) noexcept {
+        slot_type& s = pool_[si];
+        s.set_flag(slot_type::flag_no_modify);
+        if (s.pending == pending_action_t::modify) {
+            // Queued behind the refused request, and now aimed at an order the
+            // venue will not amend.
+            detach(s);
+            s.pending = pending_action_t::none;
+            attach(s);
+        }
+        // An order that has finished was too late to act on, whatever reason
+        // the venue gave.
+        if (reason != reject_reason_t::too_late_to_act && asked != s.acked_price && !is_done(s)) {
+            latch_reject(s, asked);
         }
     }
 

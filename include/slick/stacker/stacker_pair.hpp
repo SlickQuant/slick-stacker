@@ -61,6 +61,12 @@ public:
         sell_.pull();
     }
 
+    /// Lift every reject latch on both sides. See `stacker::clear_rejects()`.
+    void clear_rejects() noexcept {
+        buy_.clear_rejects();
+        sell_.clear_rejects();
+    }
+
     /// Publish the market's top of book. Either price may be `k_null_price`
     /// when that side of the book is empty.
     void on_top_of_book(price_t bid, price_t ask) noexcept {
