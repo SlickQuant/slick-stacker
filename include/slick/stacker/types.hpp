@@ -14,11 +14,12 @@ SLICK_STACKER_NAMESPACE_BEGIN
 /// scaling of your choosing. The stacker only ever adds, subtracts and divides
 /// by `tick_size`, so any integral representation works as long as it is
 /// consistent. Signed, because a level's depth arithmetic goes negative when
-/// the quote improves past the ring anchor.
+/// the quote improves past the ring anchor. Working prices are bounded by
+/// `k_min_price` and `k_max_price`.
 using price_t = std::int64_t;
 
 /// Quantity. Signed on purpose: `level::inflight` carries net in-flight change
-/// and is negative while a reduction is outstanding.
+/// and is negative while a reduction is outstanding. Bounded by `k_max_qty`.
 using qty_t = std::int64_t;
 
 /// Index into the order slot pool. `uint16_t` keeps the intrusive links small
@@ -38,6 +39,41 @@ inline constexpr price_t k_null_price = std::numeric_limits<price_t>::max();
 
 /// Sentinel meaning "unbounded" for the quantity limits in `stacker_config`.
 inline constexpr qty_t k_no_qty_limit = std::numeric_limits<qty_t>::max();
+
+/// Prices the stacker will work at: `[k_min_price, k_max_price]`, about
+/// +/-4.6e18. Any two prices in it are less than 2^63 apart, so the distance
+/// between them -- which is what every depth on the price grid is -- cannot
+/// overflow. `k_null_price` lies outside it, so no level can ever be priced at
+/// the sentinel.
+///
+/// A quote outside the range, or one whose ladder would reach past it, quotes
+/// nothing. A price outside it anywhere else -- a venue acknowledgement, a
+/// fill, a book update, a lookup -- matches no level.
+inline constexpr price_t k_max_price = (price_t{1} << 62) - 1;
+inline constexpr price_t k_min_price = -k_max_price;
+
+[[nodiscard]] constexpr bool price_in_range(price_t p) noexcept {
+    // One unsigned compare: the shift maps the range onto [0, 2 * k_max_price]
+    // and wraps everything outside it above.
+    constexpr auto k_reach = static_cast<std::uint64_t>(k_max_price);
+    return static_cast<std::uint64_t>(p) + k_reach <= 2 * k_reach;
+}
+
+/// Largest quantity the stacker will hold in any one value: about 4.4e12.
+///
+/// Every quantity that reaches the stacker's accounting -- a quote, a
+/// configured rung or level limit, an acknowledged size, a fill, a cancel -- is
+/// clamped to `[0, k_max_qty]`, and cumulative fills and cancels saturate at
+/// it. That keeps each order's counters within a few multiples of it, and a
+/// level's totals, summed over at most 2^16 orders, inside 2^62: no sum or
+/// difference the stacker forms can overflow. Book and queue updates only
+/// feed the queue-gap comparison, which needs nothing more than a negative
+/// book read as empty.
+inline constexpr qty_t k_max_qty = (qty_t{1} << 42) - 1;
+
+[[nodiscard]] constexpr qty_t clamp_qty(qty_t q) noexcept {
+    return q < 0 ? 0 : (q > k_max_qty ? k_max_qty : q);
+}
 
 /// Side of the book the stacker quotes on. Values are usable as array indices.
 enum class side_t : std::uint8_t {

@@ -41,6 +41,7 @@ enum class config_error : std::uint8_t {
     max_orders_per_level_zero,
     max_inflight_modifies_zero,
     ladder_exceeds_capacity,
+    qty_out_of_range,
 };
 
 [[nodiscard]] constexpr const char* to_string(config_error e) noexcept {
@@ -67,6 +68,8 @@ enum class config_error : std::uint8_t {
             return "max_inflight_modifies must be > 0";
         case config_error::ladder_exceeds_capacity:
             return "(levels + slack_levels) * level_gap_ticks must be < Traits::level_capacity";
+        case config_error::qty_out_of_range:
+            return "stack_qty, qty_profile and max_level_qty must be <= k_max_qty";
     }
     return "unknown";
 }
@@ -101,6 +104,7 @@ struct stacker_config {
     std::uint16_t level_gap_ticks = 1;
 
     /// Target quantity for every stack level, used when `qty_profile` is empty.
+    /// At most `k_max_qty`, as is every entry of `qty_profile`.
     qty_t stack_qty = 0;
 
     /// Per-level target quantities, outermost index = deepest level. When
@@ -110,7 +114,7 @@ struct stacker_config {
     std::span<const qty_t> qty_profile{};
 
     /// Upper bound on the total resting quantity the stacker will hold at any
-    /// single price level.
+    /// single price level. `k_no_qty_limit`, or at most `k_max_qty`.
     qty_t max_level_qty = k_no_qty_limit;
 
     // -- order sizing --------------------------------------------------------
@@ -228,12 +232,15 @@ struct stacker_config {
     ///     leaving `stack_qty` in charge.
     ///   - Negative quantities become 0, `qty_increment <= 0` becomes 1, and a
     ///     `max_order_qty` below `min_order_qty` is raised to it.
+    ///   - `stack_qty`, and a `max_level_qty` other than `k_no_qty_limit`, are
+    ///     capped at `k_max_qty`.
     ///   - `max_orders_per_level` and `max_inflight_modifies` of 0 become 1.
     ///
-    /// The exception is a negative entry inside `qty_profile`. The span is
-    /// borrowed, so it cannot be rewritten here, and `validate` on the result
-    /// still reports `negative_qty`. The stacker clamps such entries to 0 as
-    /// it copies the profile, so its own `config()` always validates.
+    /// The exception is an out-of-range entry inside `qty_profile`. The span
+    /// is borrowed, so it cannot be rewritten here, and `validate` on the
+    /// result still reports `negative_qty` or `qty_out_of_range`. The stacker
+    /// clamps such entries to `[0, k_max_qty]` as it copies the profile, so its
+    /// own `config()` always validates.
     template <class Traits = default_traits>
     [[nodiscard]] constexpr stacker_config sanitized() const noexcept {
         auto non_negative = [](qty_t q) { return q < 0 ? qty_t{0} : q; };
@@ -247,8 +254,10 @@ struct stacker_config {
         c.levels = c.clamp_levels<Traits>(levels);
         c.qty_profile =
             qty_profile.size() == levels ? qty_profile.first(c.levels) : std::span<const qty_t>{};
-        c.stack_qty = non_negative(c.stack_qty);
-        c.max_level_qty = non_negative(c.max_level_qty);
+        c.stack_qty = clamp_qty(c.stack_qty);
+        if (c.max_level_qty != k_no_qty_limit) {
+            c.max_level_qty = clamp_qty(c.max_level_qty);
+        }
         c.min_order_qty = non_negative(c.min_order_qty);
         c.max_order_qty = non_negative(c.max_order_qty);
         c.qty_hysteresis = non_negative(c.qty_hysteresis);
@@ -290,10 +299,16 @@ struct stacker_config {
             qty_hysteresis < 0 || queue_gap < 0) {
             return config_error::negative_qty;
         }
+        bool too_large =
+            stack_qty > k_max_qty || (max_level_qty != k_no_qty_limit && max_level_qty > k_max_qty);
         for (qty_t q : qty_profile) {
             if (q < 0) {
                 return config_error::negative_qty;
             }
+            too_large = too_large || q > k_max_qty;
+        }
+        if (too_large) {
+            return config_error::qty_out_of_range;
         }
         if (qty_increment <= 0) {
             return config_error::qty_increment_not_positive;

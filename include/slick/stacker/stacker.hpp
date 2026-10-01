@@ -98,9 +98,16 @@ public:
     /// A `qty` of zero pulls the top level only and leaves the ladder behind it
     /// working -- useful for stepping away from the touch without giving up
     /// depth. Use `pull()` to take everything out.
+    ///
+    /// A `price` outside `price_in_range` quotes nothing, as does one whose
+    /// ladder would reach past it: the next `reconcile()` takes the stack out
+    /// as if it had been pulled. `qty` is clamped to `[0, k_max_qty]`.
     void quote(price_t price, qty_t qty) noexcept {
-        if (qty < 0) [[unlikely]] {
-            qty = 0;
+        if (!price_in_range(price)) [[unlikely]] {
+            price = k_null_price;
+        }
+        if (qty < 0 || qty > k_max_qty) [[unlikely]] {
+            qty = clamp_qty(qty);
         }
         // Re-asserting the quote already in force is the most common call there
         // is. It cannot change the shape, so it must not cost a pass over the
@@ -216,6 +223,9 @@ public:
         if (!anchored_) {
             return;
         }
+        // Only the floor matters: `gap_behind` subtracts a non-negative queue
+        // position from this, which a negative book could overflow.
+        qty = std::max<qty_t>(qty, 0);
         const std::int32_t d = ring_.depth_of(price);
         if (d == detail::k_invalid_depth) {
             return;
@@ -314,9 +324,10 @@ public:
             return;
         }
         slot_type& s = pool_[si];
+        fill_qty = std::min(fill_qty, k_max_qty);
 
         detach(s);
-        s.filled += fill_qty;
+        s.filled = std::min(s.filled + fill_qty, k_max_qty);
         // A fill can beat the acknowledgement out of the venue. Whatever it
         // has already done is by definition working, so pull `acked_qty` up
         // rather than let `resting()` go negative.
@@ -348,7 +359,8 @@ public:
         slot_type& s = pool_[si];
 
         detach(s);
-        s.canceled += canceled_qty > 0 ? canceled_qty : s.resting();
+        const qty_t removed = canceled_qty > 0 ? std::min(canceled_qty, k_max_qty) : s.resting();
+        s.canceled = std::min(s.canceled + removed, k_max_qty);
         s.acked_qty = std::max(s.acked_qty, s.filled + s.canceled);
         s.pending = pending_action_t::none;
         s.state = order_state_t::live;
@@ -480,10 +492,13 @@ public:
         const bool grid_changed = anchored_ && next.tick_size != cfg_.tick_size;
         const bool type_changed = next.order_type != cfg_.order_type;
         cfg_ = next;
+        update_quote_limit();
         // Copies the caller's span and repoints `cfg_.qty_profile` at the copy.
         set_qty_profile(next.qty_profile);
         if (grid_changed) {
-            rebase(quote_price_);
+            // With no quote in force the old anchor is as good as any, and
+            // unlike the null price it is one the grid can be built around.
+            rebase(quote_price_ != k_null_price ? quote_price_ : ring_.anchor());
         }
         if (type_changed) {
             arm_retype();
@@ -510,6 +525,7 @@ public:
 
     void set_levels(std::uint16_t levels) noexcept {
         cfg_.levels = cfg_.template clamp_levels<Traits>(levels);
+        update_quote_limit();
         if (profile_len_ == levels) {
             // Sized for the ladder asked for: keep the rungs that still fit.
             profile_len_ = cfg_.levels;
@@ -522,14 +538,14 @@ public:
     }
 
     void set_stack_qty(qty_t qty) noexcept {
-        cfg_.stack_qty = qty < 0 ? 0 : qty;
+        cfg_.stack_qty = clamp_qty(qty);
         shape_dirty_ = true;
         dirty_ = true;
     }
 
     /// Per-level target quantities, index 0 being the level nearest the quote.
     /// An empty span reverts to the uniform `stack_qty`. The span is copied,
-    /// with negative entries clamped to 0.
+    /// with each entry clamped to `[0, k_max_qty]`.
     ///
     /// A profile whose size does not match `levels` is kept but not used --
     /// nor reported by `config()` -- until `set_levels` asks for a ladder it
@@ -538,7 +554,7 @@ public:
         profile_len_ = static_cast<std::uint16_t>(
             std::min<std::size_t>(profile.size(), Traits::max_levels));
         for (std::uint16_t i = 0; i < profile_len_; ++i) {
-            profile_[i] = profile[i] < 0 ? 0 : profile[i];
+            profile_[i] = clamp_qty(profile[i]);
         }
         publish_profile();
         shape_dirty_ = true;
@@ -662,15 +678,18 @@ private:
         }
     }
 
+    /// Level for one of a live order's own prices, binding it if need be.
+    ///
+    /// Those prices are always addressable on the current grid: `price` is a
+    /// level's own, and `on_confirmed` orphans an order the venue books
+    /// anywhere `depth_of` would refuse. A rebuild orphans every order, and an
+    /// orphan's prices are never looked up. So the depth needs no checking,
+    /// only the ring slot.
     [[nodiscard]] level_type* level_for(price_t price) noexcept {
         if (!anchored_) [[unlikely]] {
             return nullptr;
         }
-        const std::int32_t d = ring_.depth_of(price);
-        if (d == detail::k_invalid_depth) [[unlikely]] {
-            return nullptr;
-        }
-        return ring_.try_at(d);
+        return ring_.try_at(ring_.depth_of_known(price));
     }
 
     [[nodiscard]] const level_type* level_or_null(price_t price) const noexcept {
@@ -1111,9 +1130,30 @@ private:
                                : cfg_.stack_qty;
     }
 
+    /// The furthest toward the edge of `price_in_range` a quote may sit with
+    /// its whole ladder still inside: the lowest bid, or the highest offer.
+    /// Recomputed whenever the shape of the grid changes, so the check on
+    /// every reshape is a single compare. Divides rather than multiplies, so a
+    /// large tick cannot overflow it; a ladder too long to fit anywhere puts
+    /// the limit beyond the far edge of the range, past every quote.
+    void update_quote_limit() noexcept {
+        const price_t span_ticks = static_cast<price_t>(cfg_.levels) * cfg_.level_gap_ticks;
+        const price_t reach = span_ticks <= k_null_price / cfg_.tick_size
+                                  ? span_ticks * cfg_.tick_size
+                                  : k_null_price;
+        quote_limit_ = (Side == side_t::buy) ? k_min_price + reach : k_max_price - reach;
+    }
+
+    /// True when every rung of the ladder behind the quote is still in
+    /// `price_in_range`. Slack rungs need no check: they only keep levels that
+    /// already exist.
+    [[nodiscard]] bool ladder_in_range() const noexcept {
+        return (Side == side_t::buy) ? quote_price_ >= quote_limit_ : quote_price_ <= quote_limit_;
+    }
+
     void apply_shape() noexcept {
         target_consumed_ = false;
-        if (pulled_ || quote_price_ == k_null_price) {
+        if (pulled_ || quote_price_ == k_null_price || !ladder_in_range()) {
             zero_all_targets();
             return;
         }
@@ -1225,7 +1265,7 @@ private:
     /// like any other, so an unacknowledged order under `ack_required` has it
     /// deferred onto the acknowledgement, and a refused one blocks adds and
     /// arms the orphan pass until it goes out.
-    void orphan(slot_index_t si) noexcept {
+    SLICK_STACKER_COLD SLICK_STACKER_NEVER_INLINE void orphan(slot_index_t si) noexcept {
         slot_type& s = pool_[si];
         detach(s);
         unlink(si);
@@ -1481,12 +1521,16 @@ private:
         }
     }
 
-    /// Headroom left at a level before `max_level_qty` bites.
+    /// Headroom left at a level before `max_level_qty` bites, and never more
+    /// than `k_max_qty`. Every new order and every reprice is sized within
+    /// this, so no order ever carries more than `k_max_qty` new quantity --
+    /// which is what bounds every order's counters, and so every level's
+    /// totals.
     [[nodiscard]] qty_t level_room(const level_type& l) const noexcept {
         if (cfg_.max_level_qty == k_no_qty_limit) {
-            return k_no_qty_limit;
+            return k_max_qty;
         }
-        return cfg_.max_level_qty - l.working();
+        return std::min(cfg_.max_level_qty - l.working(), k_max_qty);
     }
 
     void add_to_level(level_type& l) noexcept {
@@ -1553,7 +1597,9 @@ private:
     }
 
     /// True when `market_qty` in the book leaves at least `queue_gap` behind
-    /// an order with `in_front` ahead of it.
+    /// an order with `in_front` ahead of it. `market_qty` is never negative --
+    /// `on_book_level` floors it -- so taking a non-negative position off it
+    /// cannot overflow, however large either is.
     [[nodiscard]] bool gap_behind(qty_t market_qty, qty_t in_front) const noexcept {
         return market_qty - std::max<qty_t>(in_front, 0) >= cfg_.queue_gap;
     }
@@ -1594,9 +1640,20 @@ private:
         }
         slot_type& s = pool_[si];
 
+        // A booking the grid cannot address -- off the tick grid, out of
+        // range, or absurdly far from the anchor -- belongs to no level, so
+        // the order is taken out like one a grid rebuild left behind. This is
+        // the one way a price we did not choose reaches an order, which is
+        // what lets `level_for` trust every price it is given. The prices the
+        // order already has are addressable, so they need no check.
+        if (price != s.acked_price && price != s.price && !s.has_flag(slot_type::flag_orphaned) &&
+            ring_.depth_of(price) == detail::k_invalid_depth) [[unlikely]] {
+            orphan(si);
+        }
+
         detach(s);
         s.acked_price = price;
-        s.acked_qty = qty;
+        s.acked_qty = clamp_qty(qty);
         if (is_replace && s.inflight_modifies > 0) {
             --s.inflight_modifies;
         }
@@ -1732,6 +1789,9 @@ private:
     bool target_consumed_ = false;
     bool retype_pending_ = false;
     bool orphan_retry_ = false;
+
+    // Last, so it moves none of the fields above. See `update_quote_limit`.
+    price_t quote_limit_ = 0;
 };
 
 // ---------------------------------------------------------------------------

@@ -129,7 +129,10 @@ changed costs a few nanoseconds and sends nothing at all.
 Pass `on_accepted` and `on_replaced` the price and quantity the venue actually
 booked, even when they differ from the request. Once the order owes no further
 answers, the booked values become what the stacker believes is working, and
-the next `reconcile()` reprices or tops up toward the target.
+the next `reconcile()` reprices or tops up toward the target. A booked price
+the grid cannot address — off the tick grid, or outside the
+[value ranges](#value-ranges) — belongs to no level, so that order is cancelled
+and the level rebuilt.
 
 ### Rejects
 
@@ -202,6 +205,32 @@ including the stacker's own copy of the profile, and it always passes
 - Negative quantities become 0, `qty_increment <= 0` becomes 1, a
   `max_order_qty` below `min_order_qty` is raised to it, and a zero
   `max_orders_per_level` or `max_inflight_modifies` becomes 1.
+- `stack_qty`, `qty_profile` entries and a `max_level_qty` other than
+  `k_no_qty_limit` are capped at `k_max_qty` (`validate` reports
+  `qty_out_of_range`). As with negative entries, the profile is capped as the
+  stacker copies it.
+
+### Value ranges
+
+`price_t` and `qty_t` are 64-bit, but the stacker works within narrower ranges so
+that none of its arithmetic can overflow, whatever the caller or the venue
+passes in:
+
+| | Range | |
+| --- | --- | --- |
+| Prices | `[k_min_price, k_max_price]`, ±(2^62 − 1) | Any two are less than 2^63 apart, and the `k_null_price` sentinel is outside. |
+| Quantities | `[0, k_max_qty]`, 2^42 − 1 (about 4.4e12) | Keeps a level's totals, summed over up to 2^16 orders, inside 2^62. |
+
+- A `quote()` outside the price range, or whose ladder would reach past it,
+  quotes nothing: the next `reconcile()` takes the stack out as if pulled. Its
+  quantity is clamped to `k_max_qty`.
+- A price outside the range anywhere else — an acknowledgement, a fill, a book
+  update, a lookup such as `working_at` — matches no level. So does a price more
+  than 2^30 ticks from the grid's anchor; a quote that far away rebuilds the
+  grid, as any quote the ring cannot reach does.
+- Acknowledged, filled and cancelled quantities are clamped to `k_max_qty`, and
+  an order's cumulative fills and cancels saturate there. A negative book
+  quantity reads as an empty book.
 
 ### Things worth knowing
 

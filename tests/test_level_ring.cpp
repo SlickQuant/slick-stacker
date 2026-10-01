@@ -5,9 +5,14 @@
 #include <slick/stacker/detail/level_ring.hpp>
 
 #include <cstdint>
+#include <limits>
 
+using slick::stacker::k_max_price;
+using slick::stacker::k_min_price;
+using slick::stacker::price_t;
 using slick::stacker::side_t;
 using slick::stacker::detail::k_invalid_depth;
+using slick::stacker::detail::k_max_depth;
 using slick::stacker::detail::level;
 using slick::stacker::detail::level_ring;
 
@@ -63,6 +68,30 @@ TEST(LevelRing, OffGridPriceIsRejected) {
     EXPECT_EQ(ring.depth_of(9995), k_invalid_depth);
     EXPECT_EQ(ring.depth_of(10003), k_invalid_depth);
     EXPECT_NE(ring.depth_of(9990), k_invalid_depth);
+}
+
+// A depth that does not fit in 32 bits used to be truncated onto a live one,
+// and a price at the far end of the type overflowed the subtraction.
+TEST(LevelRing, PriceOutOfReachIsRejected) {
+    buy_ring ring;
+    ring.reset(1000, 1);
+    EXPECT_EQ(ring.depth_of(1000 - (price_t{1} << 32)), k_invalid_depth) << "would alias depth 0";
+    EXPECT_EQ(ring.depth_of(1000 - k_max_depth), k_max_depth);
+    EXPECT_EQ(ring.depth_of(1000 + k_max_depth), -k_max_depth);
+    EXPECT_EQ(ring.depth_of(1000 - k_max_depth - 1), k_invalid_depth);
+    EXPECT_EQ(ring.depth_of(1000 + k_max_depth + 1), k_invalid_depth);
+
+    for (const price_t px : {std::numeric_limits<price_t>::min(), std::numeric_limits<price_t>::max(),
+                             k_min_price - 1, k_max_price + 1, k_min_price, k_max_price}) {
+        EXPECT_EQ(ring.depth_of(px), k_invalid_depth) << px;
+    }
+
+    // Both ends of the range are addressable from an anchor at the other.
+    sell_ring wide;
+    wide.reset(k_min_price, k_max_price);
+    EXPECT_EQ(wide.depth_of(k_min_price), 0);
+    EXPECT_EQ(wide.depth_of(k_max_price), 2);
+    EXPECT_EQ(wide.price_at(2), k_max_price);
 }
 
 TEST(LevelRing, IsBetterOrdersByCloserToMarket) {

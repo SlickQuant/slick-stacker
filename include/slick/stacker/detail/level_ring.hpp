@@ -13,8 +13,15 @@
 SLICK_STACKER_NAMESPACE_BEGIN
 namespace detail {
 
-/// Returned by `level_ring::depth_of` for a price that is not on the tick grid.
+/// Returned by `level_ring::depth_of` for a price the ring cannot address.
 inline constexpr std::int32_t k_invalid_depth = std::numeric_limits<std::int32_t>::min();
+
+/// Furthest depth `depth_of` reports, either side of the anchor. The headroom
+/// above it lets the stacker add a ladder span (under 2^16 ticks) and step
+/// across the band in `int32_t` without overflowing. A price further from the
+/// anchor than this is far outside any ring, so it rebuilds the grid like any
+/// other price the ring cannot reach.
+inline constexpr std::int32_t k_max_depth = std::int32_t{1} << 30;
 
 /// Fixed ring of price levels addressed by *depth* -- ticks away from an
 /// anchor price, counting in the direction that moves away from the market.
@@ -40,8 +47,11 @@ class level_ring {
 
 public:
     /// Drop every level and re-establish the price grid. Callers are
-    /// responsible for having dealt with any orders first.
+    /// responsible for having dealt with any orders first. `anchor` must be
+    /// within `price_in_range`, which is what keeps `depth_of` from
+    /// overflowing.
     void reset(price_t anchor, price_t tick_size) noexcept {
+        SLICK_STACKER_ASSERT(price_in_range(anchor) && tick_size > 0);
         anchor_ = anchor;
         tick_size_ = tick_size;
         for (auto& l : levels_) {
@@ -56,15 +66,44 @@ public:
     [[nodiscard]] static constexpr std::uint16_t capacity() noexcept { return Capacity; }
 
     /// Ticks from the anchor to `px`, increasing away from the market.
-    /// `k_invalid_depth` if `px` is not on the tick grid.
+    /// `k_invalid_depth` if `px` is not on the tick grid, is outside
+    /// `price_in_range`, or is more than `k_max_depth` ticks from the anchor.
+    ///
+    /// Any price may be passed. Both it and the anchor being in range is what
+    /// keeps the subtraction from overflowing, and the depth bound is what
+    /// keeps the narrowing exact -- a truncated depth would alias a distant
+    /// price onto a live level.
     [[nodiscard]] std::int32_t depth_of(price_t px) const noexcept {
+        if (!price_in_range(px)) [[unlikely]] {
+            return k_invalid_depth;
+        }
         const price_t diff = (Side == side_t::buy) ? (anchor_ - px) : (px - anchor_);
         if (diff % tick_size_ != 0) [[unlikely]] {
             return k_invalid_depth;
         }
-        return static_cast<std::int32_t>(diff / tick_size_);
+        const price_t depth = diff / tick_size_;
+        // `-k_max_depth <= depth <= k_max_depth`, as one unsigned compare.
+        constexpr auto k_reach = static_cast<std::uint64_t>(k_max_depth);
+        if (static_cast<std::uint64_t>(depth) + k_reach > 2 * k_reach) [[unlikely]] {
+            return k_invalid_depth;
+        }
+        return static_cast<std::int32_t>(depth);
     }
 
+    /// `depth_of` for a price already known to be addressable: one `depth_of`
+    /// has accepted against the current anchor. None of the checks are
+    /// repeated, which is what keeps level accounting -- the hottest caller --
+    /// down to a single division.
+    [[nodiscard]] std::int32_t depth_of_known(price_t px) const noexcept {
+        const price_t diff = (Side == side_t::buy) ? (anchor_ - px) : (px - anchor_);
+        const auto depth = static_cast<std::int32_t>(diff / tick_size_);
+        SLICK_STACKER_ASSERT(depth_of(px) == depth);
+        return depth;
+    }
+
+    /// Price of `depth`. Exact, and cannot overflow, for any depth whose price
+    /// is in range -- every depth `depth_of` returns, and every rung of a
+    /// ladder the stacker has checked fits.
     [[nodiscard]] price_t price_at(std::int32_t depth) const noexcept {
         const price_t off = static_cast<price_t>(depth) * tick_size_;
         return (Side == side_t::buy) ? (anchor_ - off) : (anchor_ + off);
