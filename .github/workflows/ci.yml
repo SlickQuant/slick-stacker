@@ -23,7 +23,7 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Configure CMake
-      run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DSLICK_STACKER_BUILD_TESTS=ON
+      run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DSLICK_STACKER_BUILD_TESTS=ON -DSLICK_STACKER_BUILD_EXAMPLES=ON
 
     - name: Build
       run: cmake --build build --config ${{ matrix.build_type }}
@@ -31,3 +31,108 @@ jobs:
     - name: Run Tests
       working-directory: build
       run: ctest -C ${{ matrix.build_type }} --output-on-failure
+
+  sanitizers:
+    name: sanitizers (${{ matrix.compiler }}, ASan + UBSan)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: clang
+            cxx: clang++
+          - compiler: gcc
+            cxx: g++
+
+    runs-on: ubuntu-latest
+
+    env:
+      SANITIZE_FLAGS: -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+      ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure CMake
+      run: >
+        cmake -B build -DCMAKE_BUILD_TYPE=Debug
+        -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+        -DSLICK_STACKER_BUILD_TESTS=ON -DSLICK_STACKER_BUILD_EXAMPLES=ON
+        "-DCMAKE_CXX_FLAGS=$SANITIZE_FLAGS -O1"
+        "-DCMAKE_EXE_LINKER_FLAGS=$SANITIZE_FLAGS"
+
+    - name: Build
+      run: cmake --build build -j 4
+
+    - name: Run Tests
+      working-directory: build
+      run: ctest --output-on-failure
+
+  clang-format:
+    runs-on: ubuntu-latest
+
+    env:
+      # Pinned: formatting differs between clang-format releases.
+      CLANG_FORMAT_VERSION: 20.1.8
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install clang-format
+      run: pip install "clang-format==$CLANG_FORMAT_VERSION"
+
+    - name: Check formatting
+      run: git ls-files '*.hpp' '*.cpp' | xargs clang-format --dry-run --Werror
+
+  benchmark:
+    name: benchmark regression
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Resolve baseline
+      id: base
+      env:
+        PR_BASE: ${{ github.event.pull_request.base.sha }}
+        PUSH_BEFORE: ${{ github.event.before }}
+      run: |
+        sha="${PR_BASE:-$PUSH_BEFORE}"
+        if [ -z "$sha" ] || ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
+          sha=$(git rev-parse HEAD~1)
+        fi
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        if git cat-file -e "$sha:benchmarks/CMakeLists.txt" 2>/dev/null; then
+          echo "has_bench=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "Baseline $sha has no benchmarks; nothing to compare." >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: Check out baseline
+      if: steps.base.outputs.has_bench == 'true'
+      run: git worktree add "$RUNNER_TEMP/base" "${{ steps.base.outputs.sha }}"
+
+    # Both builds use the same compiler and flags on the same runner; only the
+    # source differs.
+    - name: Build baseline and head
+      if: steps.base.outputs.has_bench == 'true'
+      run: |
+        for src in "$RUNNER_TEMP/base" "$GITHUB_WORKSPACE"; do
+          cmake -S "$src" -B "$src/build-bench" -DCMAKE_BUILD_TYPE=Release \
+                -DSLICK_STACKER_BUILD_TESTS=OFF -DSLICK_STACKER_BUILD_BENCHMARKS=ON
+          cmake --build "$src/build-bench" -j 4
+        done
+
+    - name: Compare
+      if: steps.base.outputs.has_bench == 'true'
+      run: >
+        python3 benchmarks/ab_compare.py
+        --base "$RUNNER_TEMP/base/build-bench/benchmarks"
+        --head "$GITHUB_WORKSPACE/build-bench/benchmarks"
+        --pin 1

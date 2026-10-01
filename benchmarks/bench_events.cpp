@@ -91,12 +91,16 @@ static void routing(benchmark::State& state) {
 }
 
 /// Identifier hashed into an open-addressing table.
-static void BM_RouteEvent_Hashed(benchmark::State& state) { routing<bench_executor>(state); }
+static void BM_RouteEvent_Hashed(benchmark::State& state) {
+    routing<bench_executor>(state);
+}
 BENCHMARK(BM_RouteEvent_Hashed);
 
 /// Identifier carrying the slot index in the executor's own order record: no
 /// hash, no extra cache line.
-static void BM_RouteEvent_UserData(benchmark::State& state) { routing<bench_executor_ud>(state); }
+static void BM_RouteEvent_UserData(benchmark::State& state) {
+    routing<bench_executor_ud>(state);
+}
 BENCHMARK(BM_RouteEvent_UserData);
 
 // The market-data feeds behind the queue-gap gate at the levels it is holding

@@ -40,7 +40,7 @@ public:
         order_id_t id = 0;
         side_t side = side_t::buy;
         price_t price = 0;
-        qty_t qty = 0;      ///< total order quantity as last acknowledged/requested
+        qty_t qty = 0;  ///< total order quantity as last acknowledged/requested
         qty_t filled = 0;
         bool live = true;
         order_type_t order_type = order_type_t::limit;

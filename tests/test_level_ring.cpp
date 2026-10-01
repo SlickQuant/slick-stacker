@@ -81,8 +81,9 @@ TEST(LevelRing, PriceOutOfReachIsRejected) {
     EXPECT_EQ(ring.depth_of(1000 - k_max_depth - 1), k_invalid_depth);
     EXPECT_EQ(ring.depth_of(1000 + k_max_depth + 1), k_invalid_depth);
 
-    for (const price_t px : {std::numeric_limits<price_t>::min(), std::numeric_limits<price_t>::max(),
-                             k_min_price - 1, k_max_price + 1, k_min_price, k_max_price}) {
+    for (const price_t px :
+         {std::numeric_limits<price_t>::min(), std::numeric_limits<price_t>::max(), k_min_price - 1,
+          k_max_price + 1, k_min_price, k_max_price}) {
         EXPECT_EQ(ring.depth_of(px), k_invalid_depth) << px;
     }
 

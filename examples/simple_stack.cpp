@@ -34,17 +34,16 @@ public:
 
     order_id_t place(side_t s, price_t price, qty_t qty, order_type_t type) {
         const order_id_t id = next_id_++;
-        std::printf("  -> PLACE  %-4s %6lld x %-4lld %-5s (id %llu)\n",
-                    to_string(s), static_cast<long long>(price), static_cast<long long>(qty),
-                    to_string(type), static_cast<unsigned long long>(id));
+        std::printf("  -> PLACE  %-4s %6lld x %-4lld %-5s (id %llu)\n", to_string(s),
+                    static_cast<long long>(price), static_cast<long long>(qty), to_string(type),
+                    static_cast<unsigned long long>(id));
         queue_.push_back({'P', id, price, qty});
         return id;
     }
 
     bool modify(const order_id_t& id, price_t price, qty_t qty) {
-        std::printf("  -> MODIFY id %-3llu   %6lld x %-4lld\n",
-                    static_cast<unsigned long long>(id), static_cast<long long>(price),
-                    static_cast<long long>(qty));
+        std::printf("  -> MODIFY id %-3llu   %6lld x %-4lld\n", static_cast<unsigned long long>(id),
+                    static_cast<long long>(price), static_cast<long long>(qty));
         queue_.push_back({'M', id, price, qty});
         return true;
     }
@@ -163,8 +162,9 @@ int main() {
     bid.on_filled(hit, 10, 500'025);
     settle(bid, exec);
     show("   resting:", bid, 500'025, 499'925, 25);
-    std::printf("   (the fill consumed the target: the stack does not re-arm by\n"
-                "    itself, it waits to be told)\n");
+    std::printf(
+        "   (the fill consumed the target: the stack does not re-arm by\n"
+        "    itself, it waits to be told)\n");
 
     std::printf("\n== ask for the size back ==\n");
     bid.quote(500'025, 25);

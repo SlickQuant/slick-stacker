@@ -27,8 +27,7 @@ struct test_traits {
 };
 
 /// Drives a stacker against `mock_executor` and plays the venue back at it.
-template <slick::stacker::side_t Side, class Executor = mock_executor,
-          class Traits = test_traits>
+template <slick::stacker::side_t Side, class Executor = mock_executor, class Traits = test_traits>
 class harness {
 public:
     using stacker_type = slick::stacker::stacker<Executor, Side, Traits>;

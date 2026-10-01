@@ -60,19 +60,17 @@ concept HasFlush = requires(E& e) { e.flush(); };
 /// slot index there instead and every event handler becomes a single indexed
 /// load with no hashing and no extra cache line touched.
 template <class E>
-concept HasOrderUserData =
-    requires(E& e, const typename E::order_id_t& id, std::uint32_t v) {
-        e.set_order_user_data(id, v);
-        { e.get_order_user_data(id) } -> std::convertible_to<std::uint32_t>;
-    };
+concept HasOrderUserData = requires(E& e, const typename E::order_id_t& id, std::uint32_t v) {
+    e.set_order_user_data(id, v);
+    { e.get_order_user_data(id) } -> std::convertible_to<std::uint32_t>;
+};
 
 /// Optional. Lets the executor veto acting on an order the stacker believes is
 /// actionable -- for example one the gateway knows is already being cancelled.
 /// Absent, the stacker relies solely on its own order state.
 template <class E>
-concept HasCanAct =
-    requires(E& e, const typename E::order_id_t& id) {
-        { e.can_act(id) } -> std::convertible_to<bool>;
-    };
+concept HasCanAct = requires(E& e, const typename E::order_id_t& id) {
+    { e.can_act(id) } -> std::convertible_to<bool>;
+};
 
 SLICK_STACKER_NAMESPACE_END

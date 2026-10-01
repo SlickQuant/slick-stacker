@@ -79,9 +79,9 @@ private:
     static constexpr std::uint32_t k_index_capacity =
         detail::next_pow2(static_cast<std::uint32_t>(Traits::max_orders) * 2u);
 
-    using index_type = std::conditional_t<HasOrderUserData<Executor>,
-                                          detail::null_id_index<order_id_t>,
-                                          detail::id_index<order_id_t, k_index_capacity>>;
+    using index_type =
+        std::conditional_t<HasOrderUserData<Executor>, detail::null_id_index<order_id_t>,
+                           detail::id_index<order_id_t, k_index_capacity>>;
 
 public:
     stacker(Executor& exec, const stacker_config& cfg) noexcept : exec_(&exec) { configure(cfg); }
@@ -117,8 +117,8 @@ public:
         // Unless a fill has eaten into a target since the last pass: then the
         // identical quote is the caller asking for that size back, and the
         // shape has to be laid down again.
-        if (price == quote_price_ && qty == quote_qty_ && !pulled_ &&
-            !target_consumed_) [[likely]] {
+        if (price == quote_price_ && qty == quote_qty_ && !pulled_ && !target_consumed_)
+            [[likely]] {
             return;
         }
         quote_price_ = price;
@@ -551,8 +551,8 @@ public:
     /// nor reported by `config()` -- until `set_levels` asks for a ladder it
     /// describes.
     void set_qty_profile(std::span<const qty_t> profile) noexcept {
-        profile_len_ = static_cast<std::uint16_t>(
-            std::min<std::size_t>(profile.size(), Traits::max_levels));
+        profile_len_ =
+            static_cast<std::uint16_t>(std::min<std::size_t>(profile.size(), Traits::max_levels));
         for (std::uint16_t i = 0; i < profile_len_; ++i) {
             profile_[i] = clamp_qty(profile[i]);
         }
@@ -1621,8 +1621,7 @@ private:
     /// since whatever is holding that level back is not the queue.
     [[nodiscard]] bool subject_to_queue_gap(const level_type& l) const noexcept {
         return cfg_.queue_gap > 0 && l.order_count != 0 &&
-               l.order_count < cfg_.max_orders_per_level && l.depth != top_depth_ &&
-               wants_more(l);
+               l.order_count < cfg_.max_orders_per_level && l.depth != top_depth_ && wants_more(l);
     }
 
     [[nodiscard]] static constexpr qty_t round_down(qty_t v, qty_t increment) noexcept {
@@ -1659,8 +1658,8 @@ private:
         }
         // With a chain outstanding this is only an intermediate confirmation --
         // the venue still owes us answers, so the order is not settled yet.
-        if (s.inflight_modifies == 0 && (s.state == order_state_t::pending_new ||
-                                         s.state == order_state_t::pending_modify)) {
+        if (s.inflight_modifies == 0 &&
+            (s.state == order_state_t::pending_new || s.state == order_state_t::pending_modify)) {
             s.state = order_state_t::live;
         }
         attach(s);
@@ -1684,8 +1683,7 @@ private:
             return;
         }
 
-        if (s.state == order_state_t::live && s.pending == pending_action_t::none &&
-            !s.settled()) {
+        if (s.state == order_state_t::live && s.pending == pending_action_t::none && !s.settled()) {
             // The last answer the venue owed us, and it booked something other
             // than what we asked for. Its word is final: adopt it as our intent
             // so the level is credited with what is really working there, and

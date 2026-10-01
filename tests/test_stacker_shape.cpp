@@ -337,8 +337,7 @@ TEST(StackerShape, ConfigValidation) {
 
     cfg = base_cfg();
     cfg.tick_size = 0;
-    EXPECT_EQ(cfg.validate<test_traits>(),
-              slick::stacker::config_error::tick_size_not_positive);
+    EXPECT_EQ(cfg.validate<test_traits>(), slick::stacker::config_error::tick_size_not_positive);
 
     cfg = base_cfg();
     cfg.level_gap_ticks = 0;
@@ -352,8 +351,7 @@ TEST(StackerShape, ConfigValidation) {
     cfg = base_cfg();
     cfg.levels = 3;
     cfg.qty_profile = two;
-    EXPECT_EQ(cfg.validate<test_traits>(),
-              slick::stacker::config_error::qty_profile_size_mismatch);
+    EXPECT_EQ(cfg.validate<test_traits>(), slick::stacker::config_error::qty_profile_size_mismatch);
 
     cfg = base_cfg();
     cfg.qty_increment = 0;
@@ -363,13 +361,11 @@ TEST(StackerShape, ConfigValidation) {
     cfg = base_cfg();
     cfg.min_order_qty = 10;
     cfg.max_order_qty = 5;
-    EXPECT_EQ(cfg.validate<test_traits>(),
-              slick::stacker::config_error::max_order_qty_below_min);
+    EXPECT_EQ(cfg.validate<test_traits>(), slick::stacker::config_error::max_order_qty_below_min);
 
     cfg = base_cfg();
     cfg.max_orders_per_level = 0;
-    EXPECT_EQ(cfg.validate<test_traits>(),
-              slick::stacker::config_error::max_orders_per_level_zero);
+    EXPECT_EQ(cfg.validate<test_traits>(), slick::stacker::config_error::max_orders_per_level_zero);
 
     cfg = base_cfg();
     cfg.max_inflight_modifies = 0;

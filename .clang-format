@@ -21,6 +21,7 @@ BreakInheritanceList: BeforeColon
 PointerAlignment: Left
 ReferenceAlignment: Left
 SortIncludes: true
+IncludeBlocks: Preserve
 SortUsingDeclarations: true
 SpaceAfterCStyleCast: false
 SpaceAfterTemplateKeyword: true

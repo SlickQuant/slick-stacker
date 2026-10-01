@@ -404,7 +404,29 @@ cmake --build build --target simple_stack && ./build/examples/simple_stack
 
 `examples/simple_stack.cpp` is a complete integration in one file — an executor,
 a stack, a price move, a fill and the recovery — and prints every message it
-sends.
+sends. With the tests also on, CTest runs it as a smoke test.
+
+CI builds and tests on Linux, Windows and macOS. It also runs the suite under
+AddressSanitizer and UndefinedBehaviorSanitizer (clang and gcc), checks
+formatting with clang-format 20.1.8, and compares benchmarks against the base
+commit. To reproduce the sanitizer run:
+
+```sh
+SAN="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+cmake -B build-san -DCMAKE_BUILD_TYPE=Debug -DSLICK_STACKER_BUILD_EXAMPLES=ON \
+      "-DCMAKE_CXX_FLAGS=$SAN -O1" "-DCMAKE_EXE_LINKER_FLAGS=$SAN"
+cmake --build build-san && ctest --test-dir build-san --output-on-failure
+```
+
+The benchmark check builds the base and the change on one runner and runs
+`benchmarks/ab_compare.py`, which alternates the two builds benchmark by
+benchmark and fails on a confirmed slowdown: more than 5% in geometric mean, or
+more than 25% on any one benchmark. To run it locally, point it at two benchmark
+build directories:
+
+```sh
+python3 benchmarks/ab_compare.py --base build-base/benchmarks --head build/benchmarks
+```
 
 The test suite defines `SLICK_STACKER_VALIDATE` and calls `validate()` after
 every step. That function rebuilds each level's counters from the orders feeding

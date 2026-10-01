@@ -358,19 +358,18 @@ TEST(FunctionExecutor, DrivesAStackerLikeAnyOther) {
     std::vector<message> log;
     std::uint64_t next = 1;
 
-    function_executor<> exec{
-        [&](side_t, price_t px, qty_t q, slick::stacker::order_type_t) {
-            log.push_back({'P', px, q});
-            return next++;
-        },
-        [&](const std::uint64_t&, price_t px, qty_t q) {
-            log.push_back({'M', px, q});
-            return true;
-        },
-        [&](const std::uint64_t&) {
-            log.push_back({'C', 0, 0});
-            return true;
-        }};
+    function_executor<> exec{[&](side_t, price_t px, qty_t q, slick::stacker::order_type_t) {
+                                 log.push_back({'P', px, q});
+                                 return next++;
+                             },
+                             [&](const std::uint64_t&, price_t px, qty_t q) {
+                                 log.push_back({'M', px, q});
+                                 return true;
+                             },
+                             [&](const std::uint64_t&) {
+                                 log.push_back({'C', 0, 0});
+                                 return true;
+                             }};
 
     auto cfg = base_cfg();
     slick::stacker::stacker<function_executor<>, side_t::buy, test_traits> st{exec, cfg};

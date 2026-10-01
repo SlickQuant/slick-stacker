@@ -240,8 +240,8 @@ TEST(StackerHysteresis, SmallShortfallsAreNotToppedUp) {
     const auto id = h.last_placed();
 
     const auto mark = h.exec.mark();
-    h.st.on_filled(id, 3, 1000);   // consumes the target too, so no shortfall
-    h.st.quote(1000, 25);          // ask for the size back: a shortfall of 3
+    h.st.on_filled(id, 3, 1000);  // consumes the target too, so no shortfall
+    h.st.quote(1000, 25);         // ask for the size back: a shortfall of 3
     h.settle();
     EXPECT_EQ(h.exec.count(mock_executor::kind::place, mark), 0u)
         << "three short of twenty-five is not worth a message";

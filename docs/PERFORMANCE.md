@@ -59,7 +59,9 @@ Variance *between* separate invocations on a loaded machine easily swamps a 10%
 change, so never compare a number from one session against a number from
 another. To attribute a change to a code change, build both variants and
 alternate them benchmark by benchmark — A, B, A, B — so that load drift lands on
-both equally, then compare best medians.
+both equally, then compare best medians. `benchmarks/ab_compare.py` does exactly
+this given two build directories, and CI runs it on every change against its base
+commit.
 
 Every benchmark ends each iteration in `bench_support::keep`, which escapes the
 stacker and a running checksum of every message the executor was asked to send,

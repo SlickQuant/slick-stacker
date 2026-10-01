@@ -116,9 +116,7 @@ struct bench_executor_ud : bench_executor {
 
     bench_executor_ud() { user_data.assign(k_mask + 1, 0); }
 
-    void set_order_user_data(const order_id_t& id, std::uint32_t v) {
-        user_data[id & k_mask] = v;
-    }
+    void set_order_user_data(const order_id_t& id, std::uint32_t v) { user_data[id & k_mask] = v; }
     [[nodiscard]] std::uint32_t get_order_user_data(const order_id_t& id) const {
         return user_data[id & k_mask];
     }

@@ -301,10 +301,10 @@ TEST(StackerRejects, RejectStormLeavesConsistentState) {
 // Every terminal reason, run through a venue that will never take quantity at
 // the top price: the first reject is the last message sent there.
 TEST(StackerRejects, TerminalNewRejectIsNotResent) {
-    for (const auto r : {reject_reason_t::unknown, reject_reason_t::risk_limit,
-                         reject_reason_t::invalid_price, reject_reason_t::invalid_qty,
-                         reject_reason_t::self_match_prevention, reject_reason_t::market_closed,
-                         reject_reason_t::terminal}) {
+    for (const auto r :
+         {reject_reason_t::unknown, reject_reason_t::risk_limit, reject_reason_t::invalid_price,
+          reject_reason_t::invalid_qty, reject_reason_t::self_match_prevention,
+          reject_reason_t::market_closed, reject_reason_t::terminal}) {
         SCOPED_TRACE(static_cast<int>(r));
         buy_harness h{ladder_cfg()};
         h.st.quote(1000, 25);
