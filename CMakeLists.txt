@@ -52,6 +52,11 @@ if(SLICK_STACKER_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+# Developer tooling only: a consuming project gets no format targets of ours.
+if(PROJECT_IS_TOP_LEVEL)
+    include(cmake/clang-format.cmake)
+endif()
+
 # Installation rules
 install(DIRECTORY include/ DESTINATION include)
 

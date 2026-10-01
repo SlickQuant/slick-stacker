@@ -421,6 +421,18 @@ cmake -B build-san -DCMAKE_BUILD_TYPE=Debug -DSLICK_STACKER_BUILD_EXAMPLES=ON \
 cmake --build build-san && ctest --test-dir build-san --output-on-failure
 ```
 
+The formatting check runs locally as a build target whenever slick-stacker is the
+top-level project and clang-format is on the `PATH` (or
+`SLICK_STACKER_CLANG_FORMAT` points at it): build `format-check` to check, or
+`format` to rewrite the sources in place. Neither is part of the
+default build. Use the same clang-format release as CI — configure warns if it
+differs — since formatting changes between releases:
+
+```sh
+cmake --build build --target format-check
+cmake --build build --target format
+```
+
 The benchmark check builds the base and the change on one runner and runs
 `benchmarks/ab_compare.py`, which alternates the two builds benchmark by
 benchmark and fails on a confirmed slowdown: more than 5% in geometric mean, or
