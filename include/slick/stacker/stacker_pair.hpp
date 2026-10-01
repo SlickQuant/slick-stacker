@@ -69,9 +69,21 @@ public:
 
     /// Publish the market's top of book. Either price may be `k_null_price`
     /// when that side of the book is empty.
+    ///
+    /// A move that changes a side's placement limit marks that side dirty, so
+    /// `dirty()` picks up a level the market has just unblocked. Re-publishing
+    /// an unchanged top costs two compares. The other side's live prices only
+    /// move on its own events, which already leave the pair dirty, so the
+    /// limit cannot have changed when the market has not.
     void on_top_of_book(price_t bid, price_t ask) noexcept {
-        market_bid_ = bid;
-        market_ask_ = ask;
+        if (ask != market_ask_) {
+            market_ask_ = ask;
+            guard_buy();
+        }
+        if (bid != market_bid_) {
+            market_bid_ = bid;
+            guard_sell();
+        }
     }
 
     [[nodiscard]] bool dirty() const noexcept { return buy_.dirty() || sell_.dirty(); }

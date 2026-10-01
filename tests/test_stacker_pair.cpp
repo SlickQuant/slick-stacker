@@ -168,6 +168,60 @@ TEST(StackerPair, OfferWillNotStepOntoALiveBid) {
     EXPECT_TRUE(h.pair.validate());
 }
 
+// A caller that only reconciles when `dirty()` must still see the market
+// moving off a price the bid was held back from.
+TEST(StackerPair, MarketMoveThatUnblocksALevelMarksThePairDirty) {
+    pair_harness h{base_cfg()};
+    h.pair.on_top_of_book(1000, 1010);
+    h.pair.quote(1010, 25, 1030, 25);
+    h.settle();
+    ASSERT_EQ(h.pair.buy().working_at(1010), 0) << "blocked by the market ask";
+    ASSERT_FALSE(h.pair.dirty());
+
+    h.pair.on_top_of_book(1000, 1020);
+    EXPECT_TRUE(h.pair.dirty());
+    if (h.pair.dirty()) {
+        h.settle();
+    }
+    EXPECT_EQ(h.pair.buy().working_at(1010), 25);
+    EXPECT_TRUE(h.pair.validate());
+}
+
+TEST(StackerPair, MarketMoveThatUnblocksAnOfferMarksThePairDirty) {
+    pair_harness h{base_cfg()};
+    h.pair.on_top_of_book(1010, 1020);
+    h.pair.quote(990, 25, 1010, 25);
+    h.settle();
+    ASSERT_EQ(h.pair.sell().working_at(1010), 0) << "blocked by the market bid";
+    ASSERT_FALSE(h.pair.dirty());
+
+    h.pair.on_top_of_book(1000, 1020);
+    EXPECT_TRUE(h.pair.dirty());
+    if (h.pair.dirty()) {
+        h.settle();
+    }
+    EXPECT_EQ(h.pair.sell().working_at(1010), 25);
+    EXPECT_TRUE(h.pair.validate());
+}
+
+// The quiet-tick fast path: a top that does not change either side's limit
+// must not drag a reconcile behind it.
+TEST(StackerPair, TopOfBookThatLeavesTheLimitsAloneStaysClean) {
+    pair_harness h{base_cfg()};
+    h.pair.on_top_of_book(1000, 1010);
+    h.pair.quote(1000, 25, 1010, 25);
+    h.settle();
+    ASSERT_FALSE(h.pair.dirty());
+
+    h.pair.on_top_of_book(1000, 1010);
+    EXPECT_FALSE(h.pair.dirty()) << "unchanged top";
+
+    // Our own offer at 1010 is still the tighter limit for the bid, and our
+    // bid at 1000 for the offer, so the market backing off changes nothing.
+    h.pair.on_top_of_book(990, 1020);
+    EXPECT_FALSE(h.pair.dirty()) << "own orders still bound both limits";
+}
+
 // The bid ladder reaching down is fine; it is the offer ladder reaching down
 // into it that has to be stopped. Neither ladder may overlap the other.
 TEST(StackerPair, LaddersMayNotOverlap) {

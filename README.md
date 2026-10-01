@@ -276,7 +276,9 @@ itself — even on a book with no market top — never sends both sides: the bid
 reconciles first and takes the contested prices, and the offer is held above
 it. Because a resting order has to actually be withdrawn before the other side
 may use its price, resolving a crossed quote takes a round trip; `dirty()`
-stays true until it has settled.
+stays true until it has settled. `on_top_of_book()` marks a side dirty when the
+move changes its limit (so a level the market has just unblocked is picked up),
+and is free when it does not.
 
 ## Threading
 
