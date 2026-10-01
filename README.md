@@ -277,8 +277,12 @@ stacker<my_executor, side_t::buy, my_traits> bid{exec, cfg};
 can walk arbitrarily far as long as it does not leave orders strewn across more
 than that many ticks. If it ever does, or the tick grid shifts underneath the
 stacker, the grid is rebuilt — everything working is cancelled and the stack
-starts again around the new price. `rebase_count()` reports how often that has
-happened; in steady state it should stay at one.
+starts again around the new price. Those cancels follow the same rules as any
+other: under `ack_required` an unacknowledged order is cancelled from its
+acknowledgement, and a cancel the executor refuses or the venue rejects is
+retried on the next `reconcile()`, with adds held back (`blocked_count()`)
+until it goes out. `rebase_count()` reports how often a rebuild has happened;
+in steady state it should stay at one.
 
 ## Making event routing free
 

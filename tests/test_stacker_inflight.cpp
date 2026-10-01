@@ -451,6 +451,133 @@ TEST(StackerChainedModify, ModifyRejectAfterAGridRebuild) {
     EXPECT_CONSISTENT(h);
 }
 
+// --- orphans ----------------------------------------------------------------
+//
+// A grid rebuild takes every working order out of the book and cancels it. The
+// orphan belongs to no level, so no reconcile pass would ever come back to it:
+// unless its cancel is seen through to the end, it stays working at the venue
+// while the stack quotes fresh orders on top of it.
+
+namespace {
+
+std::size_t cancels_of(const mock_executor& exec, mock_executor::order_id_t id) {
+    std::size_t n = 0;
+    for (const auto& m : exec.log) {
+        if (m.type == mock_executor::kind::cancel && m.id == id) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/// Rebuild the grid underneath the stack by moving to a finer tick.
+void rebuild_grid(buy_harness& h) {
+    auto finer = h.st.config();
+    finer.tick_size = 5;
+    const auto rebases = h.st.rebase_count();
+    h.st.configure(finer);
+    h.reconcile();
+    ASSERT_GT(h.st.rebase_count(), rebases);
+}
+
+}  // namespace
+
+TEST(StackerOrphan, RefusedCancelIsRetried) {
+    buy_harness h{chain_cfg(1)};
+    h.quote(1000, 25);
+    h.ack_all();
+    const auto old = placed_at(h.exec, 1000);
+
+    h.exec.fail_cancel = true;
+    const auto mark = h.exec.mark();
+    rebuild_grid(h);
+    ASSERT_CONSISTENT(h);
+    EXPECT_GT(h.exec.refused, 0u);
+    EXPECT_EQ(h.st.blocked_count(), 1u) << "the orphan is still working at the venue";
+    EXPECT_EQ(h.exec.count(mock_executor::kind::place, mark), 0u)
+        << "no fresh quote may go out on top of exposure we could not take off";
+    EXPECT_TRUE(h.st.dirty()) << "the refused cancel must be retried";
+
+    h.exec.fail_cancel = false;
+    h.reconcile();
+    ASSERT_CONSISTENT(h);
+    EXPECT_EQ(cancels_of(h.exec, old), 1u) << "the orphan's cancel goes out on the retry";
+    EXPECT_EQ(h.st.blocked_count(), 0u);
+
+    h.settle(16);
+    EXPECT_FALSE(h.exec.orders[old].live);
+    EXPECT_EQ(h.st.live_order_count(), 1u) << "the orphan is retired, the new quote is working";
+    EXPECT_EQ(h.exec.live_orders(), 1u);
+    EXPECT_EQ(h.working(1000), 25);
+    EXPECT_CONSISTENT(h);
+}
+
+TEST(StackerOrphan, CancelOfAnUnackedOrderWaitsForTheAck) {
+    buy_harness h{strict_cfg()};
+    h.quote(1000, 25);
+    const auto old = placed_at(h.exec, 1000);
+
+    rebuild_grid(h);
+    ASSERT_CONSISTENT(h);
+    EXPECT_EQ(cancels_of(h.exec, old), 0u) << "ack_required: nothing may go out unacknowledged";
+    EXPECT_EQ(h.st.blocked_count(), 0u) << "a deferred cancel is not a refused one";
+
+    h.ack_all();
+    ASSERT_CONSISTENT(h);
+    EXPECT_EQ(cancels_of(h.exec, old), 1u) << "the acknowledgement releases the cancel";
+
+    h.settle(16);
+    EXPECT_FALSE(h.exec.orders[old].live);
+    EXPECT_EQ(h.st.live_order_count(), 1u);
+    EXPECT_EQ(h.exec.live_orders(), 1u);
+    EXPECT_EQ(h.working(1000), 25);
+    EXPECT_CONSISTENT(h);
+}
+
+TEST(StackerOrphan, RejectedCancelIsRetried) {
+    buy_harness h{chain_cfg(1)};
+    h.quote(1000, 25);
+    h.ack_all();
+    const auto old = placed_at(h.exec, 1000);
+
+    rebuild_grid(h);
+    ASSERT_EQ(cancels_of(h.exec, old), 1u);
+    h.ignore_pending();
+
+    h.reject_cancel(old);
+    ASSERT_CONSISTENT(h);
+    EXPECT_EQ(h.st.blocked_count(), 1u);
+    EXPECT_TRUE(h.st.dirty());
+
+    h.reconcile();
+    EXPECT_EQ(cancels_of(h.exec, old), 2u) << "the rejected cancel is sent again";
+    EXPECT_EQ(h.st.blocked_count(), 0u);
+
+    h.settle(16);
+    EXPECT_FALSE(h.exec.orders[old].live);
+    EXPECT_EQ(h.st.live_order_count(), 1u);
+    EXPECT_EQ(h.exec.live_orders(), 1u);
+    EXPECT_CONSISTENT(h);
+}
+
+// An orphan whose deferred cancel is overtaken by a full fill has nothing left
+// to cancel once acknowledged; it must be retired rather than chased.
+TEST(StackerOrphan, FilledBeforeTheAckIsRetiredWithoutACancel) {
+    buy_harness h{strict_cfg()};
+    h.quote(1000, 25);
+    const auto old = placed_at(h.exec, 1000);
+
+    rebuild_grid(h);
+    h.fill(old, 25);
+    ASSERT_CONSISTENT(h);
+
+    h.ack_all();
+    ASSERT_CONSISTENT(h);
+    EXPECT_EQ(cancels_of(h.exec, old), 0u);
+    EXPECT_EQ(h.st.live_order_count(), 1u) << "the filled orphan is retired";
+    EXPECT_CONSISTENT(h);
+}
+
 TEST(StackerInFlight, LadderConvergesOverSeveralRoundTrips) {
     auto cfg = strict_cfg();
     cfg.levels = 3;

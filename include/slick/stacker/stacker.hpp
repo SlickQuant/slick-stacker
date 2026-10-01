@@ -143,6 +143,9 @@ public:
             return;
         }
         dirty_ = false;
+        // Reset before the shape is applied: a grid rebuild there can already
+        // have a cancel refused.
+        needs_retry_ = false;
 
         if (shape_dirty_) {
             shape_dirty_ = false;
@@ -152,7 +155,11 @@ public:
             return;
         }
 
-        needs_retry_ = false;
+        // An order a grid rebuild left behind is exposure no level accounts
+        // for. If its cancel was refused, nothing else will ever retry it.
+        if (orphan_retry_) [[unlikely]] {
+            orphan_pass();
+        }
         // Before anything else: an order of the wrong kind is not a candidate
         // for repricing or trimming, it is a candidate for removal. Taking it
         // out first also frees the quantity for the add pass to put back.
@@ -340,6 +347,10 @@ public:
 
         if (is_done(s)) {
             retire(si);
+        } else if (s.has_flag(slot_type::flag_orphaned)) {
+            // A partial removal left an orphan working with no cancel behind
+            // it. It belongs to no level, so only the orphan pass will act.
+            mark_blocked(si);
         }
         dirty_ = true;
     }
@@ -406,6 +417,10 @@ public:
         attach(s);
         if (is_done(s)) {
             retire(si);
+        } else if (s.has_flag(slot_type::flag_orphaned)) {
+            // The reduce pass will re-cancel a level's order; an orphan's has
+            // to come from the orphan pass.
+            mark_blocked(si);
         }
         dirty_ = true;
     }
@@ -528,9 +543,11 @@ public:
 
     [[nodiscard]] std::uint16_t live_order_count() const noexcept { return pool_.in_use(); }
 
-    /// Number of orders the stacker wanted to shrink but could not, because the
-    /// executor refused the message. Adds are suppressed while this is
-    /// non-zero, so the stack cannot grow while it is already over-exposed.
+    /// Number of orders the stacker wanted to shrink or cancel but could not,
+    /// because the executor refused the message -- including orders a grid
+    /// rebuild left behind that are still working. Adds are suppressed while
+    /// this is non-zero, so the stack cannot grow while it is already
+    /// over-exposed.
     [[nodiscard]] std::uint16_t blocked_count() const noexcept { return blocked_count_; }
 
     /// How many times the price grid has been rebuilt from scratch. Should stay
@@ -732,14 +749,14 @@ private:
     // -----------------------------------------------------------------------
 
     [[nodiscard]] static bool is_done(const slot_type& s) noexcept {
-        if (s.pending != pending_action_t::none || s.inflight_modifies != 0) {
+        if (s.pending == pending_action_t::modify || s.inflight_modifies != 0) {
             return false;
         }
         // A new order or a modify may still be confirmed for quantity we do not
-        // know about yet. An outstanding cancel cannot: it can only ever remove
-        // quantity, so an order the venue has already finished is finished even
-        // if a cancel for it is still in flight. The cancel reject that follows
-        // will find no slot, which is exactly right.
+        // know about yet. An outstanding cancel cannot -- sent or deferred -- it
+        // can only ever remove quantity, so an order the venue has already
+        // finished is finished even if a cancel for it is still owed. The
+        // cancel reject that follows will find no slot, which is exactly right.
         if (s.state == order_state_t::pending_new || s.state == order_state_t::pending_modify) {
             return false;
         }
@@ -754,6 +771,11 @@ private:
     void mark_blocked(slot_index_t si) noexcept {
         note_retry();
         slot_type& s = pool_[si];
+        if (s.has_flag(slot_type::flag_orphaned)) {
+            // No level owns it, so no reconcile pass would ever come back to
+            // it. Hand it to the orphan pass instead.
+            orphan_retry_ = true;
+        }
         if (!s.has_flag(slot_type::flag_blocked_decrement)) {
             s.set_flag(slot_type::flag_blocked_decrement);
             ++blocked_count_;
@@ -1118,30 +1140,55 @@ private:
     /// Rebuild the price grid around `anchor_price`.
     ///
     /// Reached when the live price range outgrows the ring or the tick grid
-    /// shifts underneath us. Everything working is cancelled and detached from
-    /// level accounting; the orders stay tracked, orphaned, only so their
-    /// terminal events can be matched and their slots reclaimed.
+    /// shifts underneath us. Everything working is orphaned: cancelled and
+    /// detached from level accounting, tracked only so its terminal events can
+    /// be matched and its slot reclaimed.
     SLICK_STACKER_COLD SLICK_STACKER_NEVER_INLINE void rebase(price_t anchor_price) noexcept {
         for (slot_index_t si = 0; si < Traits::max_orders; ++si) {
-            slot_type& s = pool_[si];
-            if (!s.active() || s.has_flag(slot_type::flag_orphaned)) {
-                continue;
-            }
-            detach(s);
-            unlink(si);
-            clear_blocked(si);
-            s.pending = pending_action_t::none;
-            s.set_flag(slot_type::flag_orphaned);
-            if (s.state != order_state_t::pending_cancel) {
-                if (exec_->cancel(s.id)) {
-                    s.state = order_state_t::pending_cancel;
-                }
+            const slot_type& s = pool_[si];
+            if (s.active() && !s.has_flag(slot_type::flag_orphaned)) {
+                orphan(si);
             }
         }
         ring_.reset(anchor_price, cfg_.tick_size);
         anchored_ = true;
         top_depth_ = 0;
         ++rebase_count_;
+    }
+
+    /// Take an order out of the book for good: out of level accounting and its
+    /// level's list, and cancelled. The cancel goes through `request_cancel`
+    /// like any other, so an unacknowledged order under `ack_required` has it
+    /// deferred onto the acknowledgement, and a refused one blocks adds and
+    /// arms the orphan pass until it goes out.
+    void orphan(slot_index_t si) noexcept {
+        slot_type& s = pool_[si];
+        detach(s);
+        unlink(si);
+        clear_blocked(si);
+        s.pending = pending_action_t::none;
+        s.set_flag(slot_type::flag_orphaned);
+        if (s.state != order_state_t::pending_cancel) {
+            request_cancel(si);
+        }
+    }
+
+    /// Retry the cancel of every orphan whose cancel the executor refused or
+    /// the venue rejected. Driven off the slots, like `retype_pass`, so it
+    /// stays armed only while one of them is still refused.
+    SLICK_STACKER_COLD SLICK_STACKER_NEVER_INLINE void orphan_pass() noexcept {
+        bool remaining = false;
+        for (slot_index_t si = 0; si < Traits::max_orders; ++si) {
+            const slot_type& s = pool_[si];
+            if (!s.active() || !s.has_flag(slot_type::flag_orphaned) ||
+                !s.has_flag(slot_type::flag_blocked_decrement)) {
+                continue;
+            }
+            if (!request_cancel(si)) {
+                remaining = true;
+            }
+        }
+        orphan_retry_ = remaining;
     }
 
     // -----------------------------------------------------------------------
@@ -1498,8 +1545,14 @@ private:
         attach(s);
 
         if (s.has_flag(slot_type::flag_orphaned)) {
-            // Confirmation for an order the grid rebuild left behind: it is
-            // already cancelled or about to be, and belongs to no level.
+            // Confirmation for an order the grid rebuild left behind. It
+            // belongs to no level; all that is left is the cancel it may still
+            // be owed, deferred until the venue would take it.
+            if (is_done(s)) {
+                retire(si);
+            } else {
+                drain_pending(si);
+            }
             dirty_ = true;
             return;
         }
@@ -1534,9 +1587,15 @@ private:
         if (s.has_flag(slot_type::flag_orphaned)) {
             // The grid was rebuilt underneath this order. It belongs to no
             // level and must not be booked into one -- even when its old price
-            // happens to still exist on the new grid. It is only still tracked
-            // so its terminal event can be matched.
-            s.state = order_state_t::pending_cancel;
+            // happens to still exist on the new grid. Roll its intent back all
+            // the same, so it can be retired once the venue is done with it,
+            // and leave a cancel already sent in flight; one still owed is
+            // drained or retried by the caller and the orphan pass.
+            s.price = s.acked_price;
+            s.order_qty = s.acked_qty;
+            if (s.state != order_state_t::pending_cancel) {
+                s.state = order_state_t::live;
+            }
             return;
         }
 
@@ -1550,15 +1609,10 @@ private:
 
         if (home != nullptr) {
             relink(*home, si);
-        } else if (!s.has_flag(slot_type::flag_orphaned)) {
+        } else {
             // The level it rests on is no longer addressable. Nothing sensible
             // is left to do with the order except take it out.
-            unlink(si);
-            s.set_flag(slot_type::flag_orphaned);
-            detach(s);
-            if (exec_->cancel(s.id)) {
-                s.state = order_state_t::pending_cancel;
-            }
+            orphan(si);
         }
     }
 
@@ -1590,6 +1644,7 @@ private:
     bool needs_retry_ = false;
     bool target_consumed_ = false;
     bool retype_pending_ = false;
+    bool orphan_retry_ = false;
 };
 
 // ---------------------------------------------------------------------------
