@@ -6,6 +6,75 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-01
+
+### Added
+
+- Reject latching. `clear_rejects()` lifts every latch (on `stacker` and
+  `stacker_pair`), and `rejected_at(price)` reports whether the stacker is
+  holding off a price the venue terminally refused.
+- Value bounds: `k_min_price`/`k_max_price` (±(2^62 − 1)) and `k_max_qty`
+  (2^42 − 1), with `price_in_range()` and `clamp_qty()`. Within them no
+  arithmetic the stacker does can overflow, whatever the caller or venue sends.
+- `stacker_config::sanitized<Traits>()` — a copy with every field `validate`
+  would reject replaced by the nearest usable value. Also
+  `max_fitting_levels<Traits>()` and `clamp_levels<Traits>()`.
+- `config_error::ladder_exceeds_capacity`, for a ladder
+  (`(levels + slack_levels) * level_gap_ticks`) that does not fit in
+  `Traits::level_capacity`, and `config_error::qty_out_of_range`, for a
+  `stack_qty`, `qty_profile` entry or `max_level_qty` above `k_max_qty`.
+
+### Changed
+
+- A terminal reject is no longer resent. A rejected new order, or a rejected
+  modify moving an order to a new price, latches that price until a quote
+  changes the level's target or `clear_rejects()` is called; re-asserting the
+  same quote does not lift it. A terminally rejected modify also marks the order
+  as one the venue will not amend: it is cancelled rather than modified from
+  then on. `throttled` and `retryable` still resend, and rejected cancels are
+  still retried (except `too_late_to_act`).
+- The stacker runs on `cfg.sanitized<Traits>()`, so an unvalidated config can
+  no longer corrupt it, and `config()` always passes `validate`. `config()` now
+  reports the `qty_profile` in force (pointing at the stacker's own copy)
+  rather than an empty span.
+- `validate()` rejects ladders wider than the price ring, which previously
+  aliased rungs and rebuilt the grid on every quote move. At runtime `levels` is
+  clamped to what fits, keeping the leading entries of a `qty_profile` sized
+  for the requested ladder.
+- `quote()` with a price outside `price_in_range`, or whose ladder would reach
+  past it, quotes nothing. Acknowledged, filled and cancelled quantities are
+  clamped to `k_max_qty`, and cumulative fills and cancels saturate there.
+- An acknowledgement that books a different price or quantity from the request
+  is adopted as live state once the order owes no further answers, and the next
+  `reconcile()` reprices or tops up toward the target. A booked price the grid
+  cannot address cancels the order.
+- `on_book_level` and `on_queue_position` mark the stacker dirty only when the
+  update opens the queue-gap gate at a level it is holding back, so a busy book
+  feed no longer turns into empty reconciles.
+- `stacker_pair::on_top_of_book` marks a side dirty when the move changes that
+  side's placement limit, so a level the market has just unblocked is picked
+  up.
+- Performance: Fibonacci hashing in the order-id index, a hot-first
+  `order_slot` layout, a rung-stepping walk in the shape pass, de-duplicated
+  level lookups in the accounting, and a single queue cursor per source level in
+  the reprice pass.
+
+### Fixed
+
+- `stacker_pair` could send both sides of a self-crossing quote in one
+  `reconcile()` when the book had no market top. Each side's limit is now
+  refreshed immediately before it reconciles; the bid takes contested prices.
+- Cancels of orders left behind by a grid rebuild were never retried when
+  refused, and under `ack_required` were sent to unacknowledged orders. They
+  now go through the normal cancel path: deferred onto the acknowledgement,
+  retried on refusal, and counted in `blocked_count()` until they go out.
+- A destination level that could not take a reprice stopped the reprice pass
+  from moving orders into levels behind it.
+- A fill reported at a price with no level claimed a ring slot, which could
+  force a needless grid rebuild.
+- A `configure()` that changed `tick_size` after a `quote(k_null_price, ...)`
+  rebuilt the grid around the null price. It now keeps the old anchor.
+
 ## [0.1.1] - 2026-08-19
 
 ### Added
@@ -73,5 +142,7 @@ First release.
   compares against the incrementally maintained values.
 - 164 unit tests and two benchmark suites.
 
-[Unreleased]: https://github.com/SlickQuant/slick-stacker/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/SlickQuant/slick-stacker/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/SlickQuant/slick-stacker/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/SlickQuant/slick-stacker/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/SlickQuant/slick-stacker/releases/tag/v0.1.0

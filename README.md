@@ -62,7 +62,7 @@ or fetched at configure time:
 include(FetchContent)
 FetchContent_Declare(slick-stacker
     GIT_REPOSITORY https://github.com/SlickQuant/slick-stacker.git
-    GIT_TAG        v0.1.1
+    GIT_TAG        v0.2.0
     GIT_SHALLOW    TRUE)
 FetchContent_MakeAvailable(slick-stacker)
 
@@ -232,6 +232,9 @@ passes in:
   an order's cumulative fills and cancels saturate there. A negative book
   quantity reads as an empty book.
 
+`price_in_range(p)` and `clamp_qty(q)` are the same checks the stacker applies,
+for screening values at your own boundary.
+
 ### Things worth knowing
 
 **`order_type`** — `limit` by default. Both kinds carry a price, so both are
@@ -376,7 +379,7 @@ the exact environment, and how to reproduce.
 | Change the top level size | ~220 ns |
 | Walk the quote one tick | ~480 ns, 2 messages, nothing placed |
 | Route an order event | ~9 ns hashed, ~7 ns with user data |
-| Apply a fill | ~48 ns |
+| Apply a fill | ~44 ns |
 
 The library is header-only, so the stacker itself always compiles inside your
 translation unit. Your executor is the part that may not: `get_order_user_data`
